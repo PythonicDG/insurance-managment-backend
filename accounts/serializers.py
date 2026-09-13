@@ -11,8 +11,17 @@ class LoginSerializer(serializers.Serializer):
         username = attrs.get("username")
         password = attrs.get("password")
 
+        # Allow logging in with either username or email
+        auth_username = username
+        if "@" in username:
+            try:
+                user_obj = User.objects.get(email__iexact=username)
+                auth_username = user_obj.username
+            except (User.DoesNotExist, User.MultipleObjectsReturned):
+                auth_username = username
+
         user = authenticate(
-            username=username,
+            username=auth_username,
             password=password
         )
 
