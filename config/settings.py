@@ -34,6 +34,7 @@ else:
 
 # Application definition
 INSTALLED_APPS = [
+    'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -44,7 +45,6 @@ INSTALLED_APPS = [
     # Third party apps 
     'rest_framework',
     'rest_framework.authtoken',
-    'corsheaders',
 
     # Local apps
     "accounts",
