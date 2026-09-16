@@ -97,18 +97,70 @@ class CustomerAPITests(TestCase):
         self.assertEqual(self.customer1.name, "Johnathan Doe")
         self.assertEqual(self.customer1.address, "789 New St")
 
-    def test_manual_customer_create_is_disabled(self):
-        # Direct POST creation should return 405 Method Not Allowed
-        response = self.client.post(
-            "/api/customers/",
-            data={"name": "Forbidden", "phone": "1112223334"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
-
     def test_customer_vehicles_action(self):
         response = self.client.get(f"/api/customers/{self.customer1.id}/vehicles/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         vehicles = response.json()
         self.assertEqual(len(vehicles), 1)
         self.assertEqual(vehicles[0]["vehicle_number"], "MH12AB1234")
+
+    def test_customer_create_post(self):
+        # Direct POST creation should succeed and normalize phone
+        response = self.client.post(
+            "/api/customers/",
+            data={
+                "name": "New Customer",
+                "phone": "+91 98765-11122",
+                "email": "new@example.com",
+                "address": "Some Street",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = response.json()
+        self.assertEqual(data["name"], "New Customer")
+        self.assertEqual(data["phone"], "+919876511122")
+        self.assertIn("customer_id", data)
+        self.assertEqual(data["customer_id"], data["id"])
+
+    def test_lookup_by_normalized_phone(self):
+        # Lookup using formatted phone number matching customer1 (9876543210)
+        response = self.client.get("/api/customers/lookup/?phone=98765-43210")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertTrue(data["found"])
+        self.assertEqual(data["count"], 1)
+        self.assertIsNotNone(data["customer"])
+        self.assertEqual(data["customer"]["id"], self.customer1.id)
+        self.assertEqual(data["customer"]["customer_id"], self.customer1.id)
+        self.assertEqual(data["customer"]["name"], "John Doe")
+
+    def test_multiple_customers_share_phone_number(self):
+        # Multiple customers can share the same phone number
+        customer_shared = Customer.objects.create(
+            name="Brother Doe",
+            phone="9876543210",
+            email="brother@example.com",
+            address="Same House, 123 Main St",
+        )
+        # Verify both have different customer_ids
+        self.assertNotEqual(self.customer1.id, customer_shared.id)
+        self.assertEqual(self.customer1.phone, customer_shared.phone)
+
+        # Lookup returns both customers
+        response = self.client.get("/api/customers/lookup/?phone=+91-9876543210")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertTrue(data["found"])
+        self.assertEqual(data["count"], 2)
+        ids = [c["id"] for c in data["customers"]]
+        self.assertIn(self.customer1.id, ids)
+        self.assertIn(customer_shared.id, ids)
+
+    def test_lookup_not_found(self):
+        response = self.client.get("/api/customers/lookup/?phone=9999999999")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertFalse(data["found"])
+        self.assertEqual(data["count"], 0)
+        self.assertIsNone(data["customer"])

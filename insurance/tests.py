@@ -461,3 +461,68 @@ class InsuranceRecordAPITestCase(APITestCase):
         del_res = self.client.delete(f"/api/insurance/documents/{doc_id}/")
         self.assertEqual(del_res.status_code, status.HTTP_200_OK)
         self.assertFalse(InsuranceDocument.objects.filter(id=doc_id).exists())
+
+    def test_create_record_updates_existing_customer_details_without_duplicate(self):
+        """Editing customer name/address with customer_id updates customer in-place without duplicate."""
+        existing_cust = Customer.objects.create(
+            name="Original Name",
+            phone="9876500001",
+            address="Original Address",
+            email="orig@example.com",
+        )
+        initial_customer_count = Customer.objects.count()
+
+        payload = {
+            "policy_number": "POL-UPDATE-001",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "5000.00",
+            "insurance_company_id": self.company.id,
+            "customer_id": existing_cust.id,
+            "customer_name": "Updated Name",
+            "customer_address": "New Address 123",
+            "customer_phone": "9876500001",
+            "vehicle_number": "MH01AA1111",
+            "vehicle_type": "Car",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        # Ensure no duplicate customer was created
+        self.assertEqual(Customer.objects.count(), initial_customer_count)
+        existing_cust.refresh_from_db()
+        self.assertEqual(existing_cust.name, "Updated Name")
+        self.assertEqual(existing_cust.address, "New Address 123")
+
+    def test_create_record_new_customer_same_phone_different_person(self):
+        """Creating a new customer sharing the same phone creates separate customer with unique customer_id."""
+        existing_cust = Customer.objects.create(
+            name="Father Doe",
+            phone="9876500002",
+            address="Family Home",
+        )
+        initial_count = Customer.objects.count()
+
+        payload = {
+            "policy_number": "POL-SHARED-001",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "6000.00",
+            "insurance_company_id": self.company.id,
+            "create_new_customer": True,
+            "customer_name": "Son Doe",
+            "customer_phone": "9876500002",
+            "customer_address": "Apartment 4B",
+            "vehicle_number": "MH02BB2222",
+            "vehicle_type": "Bike",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        # Separate customer must be created
+        self.assertEqual(Customer.objects.count(), initial_count + 1)
+        new_cust = Customer.objects.filter(name="Son Doe").first()
+        self.assertIsNotNone(new_cust)
+        self.assertNotEqual(new_cust.id, existing_cust.id)
+        self.assertEqual(new_cust.phone, existing_cust.phone)
+        self.assertEqual(res.data["data"]["customer"]["id"], new_cust.id)

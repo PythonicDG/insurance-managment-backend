@@ -90,7 +90,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             InsuranceRecord.objects.select_related(
                 "customer", "vehicle", "insurance_company"
             )
-            .prefetch_related("documents")
+            .prefetch_related("documents", "payments")
             .all()
         )
 
@@ -179,7 +179,30 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 policy_expiry_date__lte=thirty_days_later,
             )
 
-        # 6. Sorting / Ordering
+        # 6. Payment Status Filter (UNPAID, PARTIAL, PAID)
+        payment_status_filter = params.get("payment_status", "").strip().upper()
+        if payment_status_filter:
+            from decimal import Decimal
+            from django.db.models import DecimalField, F, Sum
+            from django.db.models.functions import Coalesce
+
+            queryset = queryset.annotate(
+                annotated_paid=Coalesce(
+                    Sum("payments__amount"),
+                    Decimal("0.00"),
+                    output_field=DecimalField(),
+                )
+            )
+            if payment_status_filter == "UNPAID":
+                queryset = queryset.filter(annotated_paid__lte=0)
+            elif payment_status_filter == "PAID":
+                queryset = queryset.filter(annotated_paid__gte=F("total_premium"))
+            elif payment_status_filter == "PARTIAL":
+                queryset = queryset.filter(
+                    annotated_paid__gt=0, annotated_paid__lt=F("total_premium")
+                )
+
+        # 7. Sorting / Ordering
         ordering = params.get("ordering") or params.get("order_by")
         valid_orderings = [
             "entry_date",
@@ -355,6 +378,95 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         doc.delete()
         return Response(
             {"message": "Document deleted successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="payments")
+    def payments(self, request, pk=None):
+        """
+        GET  /api/insurance/records/<id>/payments/ -> List payments for this record
+        POST /api/insurance/records/<id>/payments/ -> Add a payment to this record
+        """
+        record = self.get_object()
+        from payments.serializers import PaymentSerializer
+
+        if request.method == "GET":
+            payments_qs = record.payments.all().order_by("-payment_date", "-created_at")
+            serializer = PaymentSerializer(payments_qs, many=True, context={"request": request})
+
+            if request.query_params.get("format") == "summary" or request.query_params.get("summary") == "true":
+                return Response(
+                    {
+                        "insurance_record_id": record.id,
+                        "total_premium": f"{record.total_premium:.2f}",
+                        "total_paid": f"{record.total_paid:.2f}",
+                        "outstanding": f"{record.outstanding:.2f}",
+                        "status": record.payment_status,
+                        "payment_status": record.payment_status,
+                        "payments": serializer.data,
+                        "transactions": serializer.data,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        # POST
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        data["insurance_record_id"] = record.id
+        serializer = PaymentSerializer(data=data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save(insurance_record=record)
+        record.refresh_from_db()
+
+        return Response(
+            {
+                "message": "Payment recorded successfully.",
+                "data": serializer.data,
+                "total_paid": f"{record.total_paid:.2f}",
+                "outstanding": f"{record.outstanding:.2f}",
+                "payment_status": record.payment_status,
+                "status": record.payment_status,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["delete"], url_path=r"payments/(?P<payment_id>[^/.]+)")
+    def delete_payment(self, request, pk=None, payment_id=None):
+        """
+        DELETE /api/insurance/records/<id>/payments/<payment_id>/
+        """
+        record = self.get_object()
+        payment = get_object_or_404(record.payments.all(), pk=payment_id)
+        payment.delete()
+        return Response(
+            {"message": "Payment deleted successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"], url_path="payment-history")
+    def payment_history(self, request, pk=None):
+        """
+        GET /api/insurance/records/<id>/payment-history/
+        """
+        record = self.get_object()
+        from payments.serializers import PaymentSerializer
+        serializer = PaymentSerializer(
+            record.payments.all().order_by("-payment_date", "-created_at"),
+            many=True,
+            context={"request": request},
+        )
+        return Response(
+            {
+                "insurance_record_id": record.id,
+                "total_premium": f"{record.total_premium:.2f}",
+                "total_paid": f"{record.total_paid:.2f}",
+                "outstanding": f"{record.outstanding:.2f}",
+                "status": record.payment_status,
+                "payment_status": record.payment_status,
+                "payments": serializer.data,
+                "transactions": serializer.data,
+            },
             status=status.HTTP_200_OK,
         )
 

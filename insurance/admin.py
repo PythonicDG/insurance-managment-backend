@@ -16,6 +16,14 @@ class InsuranceCompanyAdmin(admin.ModelAdmin):
     search_fields = ("name",)
 
 
+class PaymentInline(admin.TabularInline):
+    from payments.models import Payment
+    model = Payment
+    extra = 0
+    fields = ("amount", "payment_method", "payment_date", "notes", "created_at")
+    readonly_fields = ("created_at",)
+
+
 @admin.register(InsuranceRecord)
 class InsuranceRecordAdmin(admin.ModelAdmin):
     list_display = (
@@ -24,6 +32,9 @@ class InsuranceRecordAdmin(admin.ModelAdmin):
         "vehicle",
         "insurance_company",
         "total_premium",
+        "total_paid",
+        "outstanding",
+        "payment_status",
         "entry_date",
         "policy_start_date",
         "policy_expiry_date",
@@ -42,7 +53,7 @@ class InsuranceRecordAdmin(admin.ModelAdmin):
         "vehicle__vehicle_number",
         "insurance_company__name",
     )
-    inlines = [InsuranceDocumentInline]
+    inlines = [InsuranceDocumentInline, PaymentInline]
 
 
 @admin.register(InsuranceDocument)

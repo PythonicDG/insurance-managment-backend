@@ -1,3 +1,4 @@
+from decimal import Decimal
 import os
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -100,6 +101,34 @@ class InsuranceRecord(models.Model):
             return "expiring_soon"
         return "active"
 
+    @property
+    def total_paid(self) -> Decimal:
+        total = self.payments.aggregate(total=models.Sum("amount"))["total"]
+        if total is None:
+            return Decimal("0.00")
+        return Decimal(str(total)).quantize(Decimal("0.01"))
+
+    @property
+    def outstanding(self) -> Decimal:
+        total_paid = self.total_paid
+        total_premium = self.total_premium if self.total_premium is not None else Decimal("0.00")
+        diff = total_premium - total_paid
+        return Decimal(str(diff)).quantize(Decimal("0.01"))
+
+    @property
+    def payment_status(self) -> str:
+        total_paid = self.total_paid
+        total_premium = self.total_premium if self.total_premium is not None else Decimal("0.00")
+        if total_paid <= Decimal("0.00"):
+            return "UNPAID"
+        elif total_paid < total_premium:
+            return "PARTIAL"
+        else:
+            return "PAID"
+
+    def get_payment_status(self) -> str:
+        return self.payment_status
+
 
 def insurance_document_upload_path(instance, filename):
     record_id = instance.record_id or "temp"
@@ -143,3 +172,10 @@ class InsuranceDocument(models.Model):
             except Exception:
                 pass
         super().delete(*args, **kwargs)
+
+
+# Re-export Payment for convenient import
+try:
+    from payments.models import Payment  # noqa: F401
+except ImportError:
+    pass

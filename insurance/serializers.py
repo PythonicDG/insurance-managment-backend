@@ -1,9 +1,11 @@
+from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
 from customers.models import Customer
 from vehicles.models import Vehicle
+from payments.serializers import PaymentSerializer
 from .models import InsuranceCompany, InsuranceDocument, InsuranceRecord
 
 
@@ -88,6 +90,13 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
     days_left = serializers.IntegerField(read_only=True)
     status = serializers.CharField(read_only=True)
     documents_count = serializers.IntegerField(source="documents.count", read_only=True)
+    payments = PaymentSerializer(many=True, read_only=True)
+    transactions = PaymentSerializer(source="payments", many=True, read_only=True)
+    total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    outstanding = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    payment_status = serializers.CharField(read_only=True)
+    paid_amount = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
+    balance = serializers.DecimalField(source="outstanding", max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = InsuranceRecord
@@ -106,6 +115,13 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
             "days_left",
             "status",
             "documents_count",
+            "payments",
+            "transactions",
+            "total_paid",
+            "outstanding",
+            "payment_status",
+            "paid_amount",
+            "balance",
             "created_at",
             "updated_at",
         ]
@@ -117,9 +133,16 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
     vehicle = RecordVehicleSummarySerializer(read_only=True)
     insurance_company = RecordCompanySummarySerializer(read_only=True)
     documents = InsuranceDocumentSerializer(many=True, read_only=True)
+    payments = PaymentSerializer(many=True, read_only=True)
+    transactions = PaymentSerializer(source="payments", many=True, read_only=True)
     is_expired = serializers.BooleanField(read_only=True)
     days_left = serializers.IntegerField(read_only=True)
     status = serializers.CharField(read_only=True)
+    total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    outstanding = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    payment_status = serializers.CharField(read_only=True)
+    paid_amount = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
+    balance = serializers.DecimalField(source="outstanding", max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = InsuranceRecord
@@ -135,6 +158,13 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
             "vehicle",
             "insurance_company",
             "documents",
+            "payments",
+            "transactions",
+            "total_paid",
+            "outstanding",
+            "payment_status",
+            "paid_amount",
+            "balance",
             "is_expired",
             "days_left",
             "status",
@@ -159,11 +189,23 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(max_length=255, required=False, allow_blank=True, write_only=True)
     customer_email = serializers.EmailField(required=False, allow_blank=True, write_only=True)
     customer_address = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    create_new_customer = serializers.BooleanField(required=False, default=False, write_only=True)
 
     # Vehicle inputs (Support either existing ID or automatic create/find details)
     vehicle_id = serializers.IntegerField(required=False, write_only=True)
     vehicle_number = serializers.CharField(max_length=50, required=False, write_only=True)
     vehicle_type = serializers.CharField(max_length=50, required=False, allow_blank=True, write_only=True)
+
+    # Initial Payment inputs (optional on record creation)
+    initial_payment = serializers.JSONField(required=False, write_only=True)
+    paid_amount = serializers.JSONField(required=False, write_only=True)
+    initial_payment_method = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    initial_payment_date = serializers.DateField(required=False, write_only=True)
+    initial_payment_notes = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    payment_method = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    payment_mode = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    payment_date = serializers.DateField(required=False, write_only=True)
+    payment_notes = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
     class Meta:
         model = InsuranceRecord
@@ -183,10 +225,20 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "customer_name",
             "customer_email",
             "customer_address",
+            "create_new_customer",
             "vehicle",
             "vehicle_id",
             "vehicle_number",
             "vehicle_type",
+            "initial_payment",
+            "paid_amount",
+            "initial_payment_method",
+            "initial_payment_date",
+            "initial_payment_notes",
+            "payment_method",
+            "payment_mode",
+            "payment_date",
+            "payment_notes",
         ]
         read_only_fields = ["id", "customer", "vehicle"]
         extra_kwargs = {
@@ -276,46 +328,72 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def _resolve_customer(self, validated_data):
-        # 1. Check direct customer_id
-        customer_id = validated_data.pop("customer_id", None) or self.initial_data.get("customer_id")
-        if not customer_id and isinstance(self.initial_data.get("customer"), int):
-            customer_id = self.initial_data.get("customer")
+        create_new_customer = validated_data.pop("create_new_customer", False)
+        if create_new_customer is None:
+            create_new_customer = self.initial_data.get("create_new_customer", False)
+        if isinstance(create_new_customer, str):
+            create_new_customer = create_new_customer.lower() in ("true", "1", "yes")
+
+        # 1. Check direct customer_id (only if NOT explicitly creating a new customer)
+        customer_id = None
+        if not create_new_customer:
+            customer_id = validated_data.pop("customer_id", None) or self.initial_data.get("customer_id")
+            if not customer_id and isinstance(self.initial_data.get("customer"), int):
+                customer_id = self.initial_data.get("customer")
+            if not customer_id and getattr(self, "instance", None) and self.instance.customer_id:
+                customer_id = self.instance.customer_id
+        else:
+            validated_data.pop("customer_id", None)
 
         customer_name = (
             validated_data.pop("customer_name", "")
             or self.initial_data.get("customer_name")
             or self.initial_data.get("name", "")
         )
+        if customer_name:
+            customer_name = customer_name.strip()
+
         customer_email = (
             validated_data.pop("customer_email", "")
             or self.initial_data.get("customer_email")
             or self.initial_data.get("email", "")
         )
+        if customer_email:
+            customer_email = customer_email.strip()
+
         customer_address = (
             validated_data.pop("customer_address", "")
             or self.initial_data.get("customer_address")
             or self.initial_data.get("address", "")
         )
+        if customer_address:
+            customer_address = customer_address.strip()
+
         customer_phone = (
             validated_data.pop("customer_phone", "")
             or self.initial_data.get("customer_phone")
             or self.initial_data.get("phone", "")
         )
 
+        # If existing customer_id is specified: Update existing customer in place (no duplicate)
         if customer_id:
             try:
                 customer = Customer.objects.get(pk=customer_id)
-                # Update empty fields if new values are provided
                 dirty = False
-                if customer_name and not customer.name:
+                if customer_name and customer.name != customer_name:
                     customer.name = customer_name
                     dirty = True
-                if customer_email and not customer.email:
-                    customer.email = customer_email
-                    dirty = True
-                if customer_address and not customer.address:
+                if customer_address is not None and customer_address != "" and customer.address != customer_address:
                     customer.address = customer_address
                     dirty = True
+                if customer_email is not None and customer_email != "" and customer.email != customer_email:
+                    customer.email = customer_email
+                    dirty = True
+                if customer_phone:
+                    norm_phone = Customer.normalize_phone(customer_phone)
+                    if norm_phone and customer.phone != norm_phone:
+                        customer.phone = norm_phone
+                        dirty = True
                 if dirty:
                     customer.save()
                 return customer
@@ -330,27 +408,43 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             if not normalized_phone:
                 raise serializers.ValidationError({"customer_phone": "Valid phone number is required."})
 
-            customer, created = Customer.get_or_create_by_phone(
+            if create_new_customer:
+                # Explicitly create new customer record with its own unique customer_id
+                return Customer.objects.create(
+                    phone=normalized_phone,
+                    name=customer_name or "",
+                    email=customer_email or "",
+                    address=customer_address or "",
+                )
+
+            # Check if customer already exists
+            existing_qs = Customer.objects.filter(phone=normalized_phone)
+            if customer_name:
+                named_match = existing_qs.filter(name__iexact=customer_name).first()
+                if named_match:
+                    dirty = False
+                    if customer_address and named_match.address != customer_address:
+                        named_match.address = customer_address
+                        dirty = True
+                    if customer_email and named_match.email != customer_email:
+                        named_match.email = customer_email
+                        dirty = True
+                    if dirty:
+                        named_match.save()
+                    return named_match
+
+            # If no name given and existing customer exists with this phone
+            first_match = existing_qs.order_by("created_at").first()
+            if first_match and not customer_name:
+                return first_match
+
+            # Otherwise create a new customer
+            return Customer.objects.create(
                 phone=normalized_phone,
-                name=customer_name,
-                email=customer_email,
-                address=customer_address,
+                name=customer_name or "",
+                email=customer_email or "",
+                address=customer_address or "",
             )
-            # If existed, update fields if provided
-            if not created:
-                dirty = False
-                if customer_name and customer.name != customer_name:
-                    customer.name = customer_name
-                    dirty = True
-                if customer_email and customer.email != customer_email:
-                    customer.email = customer_email
-                    dirty = True
-                if customer_address and customer.address != customer_address:
-                    customer.address = customer_address
-                    dirty = True
-                if dirty:
-                    customer.save()
-            return customer
 
         return None
 
@@ -402,14 +496,49 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        # Flow:
-        # Create Record
-        #       ↓
-        # Customer Created/Found
-        #       ↓
-        # Vehicle Created/Found
-        #       ↓
-        # Insurance Record Created
+        # Extract initial payment info before creating record
+        raw_init_pay = (
+            validated_data.pop("initial_payment", None)
+            or validated_data.pop("paid_amount", None)
+            or self.initial_data.get("initial_payment")
+            or self.initial_data.get("paid_amount")
+        )
+        pay_method = (
+            validated_data.pop("initial_payment_method", None)
+            or validated_data.pop("payment_method", None)
+            or validated_data.pop("payment_mode", None)
+            or self.initial_data.get("initial_payment_method")
+            or self.initial_data.get("payment_method")
+            or self.initial_data.get("payment_mode")
+            or "Cash"
+        )
+        pay_date = (
+            validated_data.pop("initial_payment_date", None)
+            or validated_data.pop("payment_date", None)
+            or self.initial_data.get("initial_payment_date")
+            or self.initial_data.get("payment_date")
+            or None
+        )
+        pay_notes = (
+            validated_data.pop("initial_payment_notes", None)
+            or validated_data.pop("payment_notes", None)
+            or validated_data.pop("payment_remark", None)
+            or self.initial_data.get("initial_payment_notes")
+            or self.initial_data.get("payment_notes")
+            or "Initial payment"
+        )
+        for k in [
+            "initial_payment",
+            "paid_amount",
+            "initial_payment_method",
+            "initial_payment_date",
+            "initial_payment_notes",
+            "payment_method",
+            "payment_mode",
+            "payment_date",
+            "payment_notes",
+        ]:
+            validated_data.pop(k, None)
 
         # 1. Customer Created/Found
         customer = self._resolve_customer(validated_data)
@@ -431,6 +560,34 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         # 3. Insurance Record Created
         record = super().create(validated_data)
 
+        # 4. Handle initial payment if provided
+        init_amount = None
+        if isinstance(raw_init_pay, dict):
+            init_amount = raw_init_pay.get("amount")
+            pay_method = raw_init_pay.get("payment_method") or raw_init_pay.get("payment_mode") or pay_method
+            pay_date = raw_init_pay.get("payment_date") or raw_init_pay.get("date") or pay_date
+            pay_notes = raw_init_pay.get("notes") or raw_init_pay.get("note") or pay_notes
+        elif raw_init_pay is not None and str(raw_init_pay).strip() != "":
+            try:
+                init_amount = Decimal(str(raw_init_pay).strip())
+            except Exception:
+                init_amount = None
+
+        if init_amount is not None:
+            try:
+                dec_amount = Decimal(str(init_amount))
+                if dec_amount > Decimal("0.00"):
+                    from payments.models import Payment
+                    Payment.objects.create(
+                        insurance_record=record,
+                        amount=dec_amount,
+                        payment_method=str(pay_method).strip() or "Cash",
+                        payment_date=pay_date or record.policy_start_date or record.entry_date or timezone.localdate(),
+                        notes=str(pay_notes).strip(),
+                    )
+            except Exception:
+                pass
+
         # Optional: Handle file uploads included in the multipart request
         request = self.context.get("request")
         if request and hasattr(request, "FILES") and request.FILES:
@@ -451,6 +608,19 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        for k in [
+            "initial_payment",
+            "paid_amount",
+            "initial_payment_method",
+            "initial_payment_date",
+            "initial_payment_notes",
+            "payment_method",
+            "payment_mode",
+            "payment_date",
+            "payment_notes",
+        ]:
+            validated_data.pop(k, None)
+
         # Update customer if provided
         new_customer = self._resolve_customer(validated_data)
         if new_customer:
