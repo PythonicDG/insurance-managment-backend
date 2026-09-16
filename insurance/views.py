@@ -249,6 +249,52 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=False, methods=["get"], url_path="check-duplicate")
+    def check_duplicate(self, request):
+        """
+        Check if a policy number already exists (case-insensitive & trimmed).
+        Query params:
+        - policy_number: string
+        - exclude_id: int (optional, for edit mode)
+        """
+        raw_number = request.query_params.get("policy_number", "")
+        trimmed_number = raw_number.strip()
+        if not trimmed_number:
+            return Response({"is_duplicate": False, "record": None}, status=status.HTTP_200_OK)
+
+        queryset = InsuranceRecord.objects.select_related(
+            "customer", "vehicle", "insurance_company"
+        ).prefetch_related("documents").filter(policy_number__iexact=trimmed_number)
+
+        exclude_id = request.query_params.get("exclude_id") or request.query_params.get("id")
+        if exclude_id:
+            try:
+                queryset = queryset.exclude(pk=int(exclude_id))
+            except (ValueError, TypeError):
+                pass
+
+        existing = queryset.first()
+        if existing:
+            detail_data = InsuranceRecordDetailSerializer(existing, context={"request": request}).data
+            customer_name = existing.customer.name if existing.customer and existing.customer.name else (existing.customer.phone if existing.customer else "Unknown Customer")
+            vehicle_num = existing.vehicle.vehicle_number if existing.vehicle else "Unknown Vehicle"
+            return Response(
+                {
+                    "is_duplicate": True,
+                    "message": f"Policy number '{trimmed_number}' already exists (registered to {customer_name} - {vehicle_num}).",
+                    "record": detail_data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {
+                "is_duplicate": False,
+                "record": None,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(
         detail=True,
         methods=["get", "post"],

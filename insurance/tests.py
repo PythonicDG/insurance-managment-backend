@@ -100,6 +100,140 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertEqual(Customer.objects.count(), 1)
         self.assertEqual(Vehicle.objects.count(), 1)
 
+    def test_duplicate_policy_number_is_rejected(self):
+        """Duplicate insurance policy numbers should be rejected."""
+        customer = Customer.objects.create(name="Aarav Nair", phone="9876500001")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="TN01AA1111")
+        InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="DUP-001",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=12000,
+        )
+
+        duplicate_payload = {
+            "policy_number": "DUP-001",
+            "entry_date": str(self.today),
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "15000.00",
+            "insurance_company_id": self.company.id,
+            "customer_phone": "9876500002",
+            "customer_name": "New Customer",
+            "customer_email": "new@example.com",
+            "customer_address": "Chennai",
+            "vehicle_number": "TN01AA2222",
+            "vehicle_type": "Four Wheeler",
+        }
+
+        response = self.client.post("/api/insurance/records/", duplicate_payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("policy_number", response.data)
+        self.assertIn("DUP-001", str(response.data["policy_number"]))
+        self.assertIn("Aarav Nair", str(response.data["policy_number"]))
+
+    def test_duplicate_policy_number_case_insensitive_and_whitespace(self):
+        """Case-insensitive and whitespace-padded duplicate policy numbers should be rejected."""
+        customer = Customer.objects.create(name="Rohit Sharma", phone="9876511111")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH01AA1234")
+        InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="POL-CASE-123",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=15000,
+        )
+
+        # Attempt to create with lowercase and leading/trailing spaces
+        duplicate_payload = {
+            "policy_number": "   pol-case-123   ",
+            "entry_date": str(self.today),
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "16000.00",
+            "insurance_company_id": self.company.id,
+            "customer_phone": "9876522222",
+            "customer_name": "Another Customer",
+            "vehicle_number": "MH01AA5678",
+        }
+
+        response = self.client.post("/api/insurance/records/", duplicate_payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("policy_number", response.data)
+        self.assertTrue(any("already registered" in str(err) for err in response.data["policy_number"]))
+
+    def test_model_level_trim_and_duplicate_validation(self):
+        """Model level save() should trim spaces and raise ValidationError on case-insensitive duplicate."""
+        from django.core.exceptions import ValidationError
+
+        customer = Customer.objects.create(name="Sunil Gavaskar", phone="9876533333")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH02BB1111")
+        record1 = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="   TRIM-POL-999   ",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=5000,
+        )
+        self.assertEqual(record1.policy_number, "TRIM-POL-999")
+
+        # Second record with case-variant should fail on save
+        record2 = InsuranceRecord(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="trim-pol-999",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=6000,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            record2.save()
+        self.assertIn("policy_number", ctx.exception.message_dict)
+
+    def test_check_duplicate_endpoint(self):
+        """Test GET /api/insurance/records/check-duplicate/ with existing context."""
+        customer = Customer.objects.create(name="Kapil Dev", phone="9876544444")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="DL01XY9999", vehicle_type="SUV")
+        record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="CHECK-DUP-777",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=25000,
+        )
+
+        # Check existing (case-insensitive & padded)
+        res = self.client.get("/api/insurance/records/check-duplicate/?policy_number=  check-dup-777  ")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data["is_duplicate"])
+        self.assertIsNotNone(res.data["record"])
+        self.assertEqual(res.data["record"]["id"], record.id)
+        self.assertEqual(res.data["record"]["customer"]["name"], "Kapil Dev")
+        self.assertEqual(res.data["record"]["vehicle"]["vehicle_number"], "DL01XY9999")
+        self.assertEqual(res.data["record"]["policy_expiry_date"], str(self.next_year))
+
+        # Check existing when excluded by ID (edit mode)
+        res_exclude = self.client.get(f"/api/insurance/records/check-duplicate/?policy_number=CHECK-DUP-777&exclude_id={record.id}")
+        self.assertEqual(res_exclude.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_exclude.data["is_duplicate"])
+        self.assertIsNone(res_exclude.data["record"])
+
+        # Check non-existent
+        res_non = self.client.get("/api/insurance/records/check-duplicate/?policy_number=UNIQUE-POLICY-12345")
+        self.assertEqual(res_non.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_non.data["is_duplicate"])
+        self.assertIsNone(res_non.data["record"])
+
     def test_list_records_search_and_pagination(self):
         """Test search by policy number, customer, and vehicle with pagination."""
         customer1 = Customer.objects.create(name="Vikram Singh", phone="9988776655")

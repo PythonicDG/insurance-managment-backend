@@ -1,4 +1,5 @@
 import os
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
@@ -34,7 +35,7 @@ class InsuranceRecord(models.Model):
         on_delete=models.CASCADE,
         related_name="insurance_records",
     )
-    policy_number = models.CharField(max_length=100, db_index=True)
+    policy_number = models.CharField(unique=True, max_length=100, db_index=True)
     entry_date = models.DateField(default=timezone.localdate)
     policy_start_date = models.DateField()
     policy_expiry_date = models.DateField(db_index=True)
@@ -47,6 +48,30 @@ class InsuranceRecord(models.Model):
         ordering = ["-entry_date", "-created_at"]
         verbose_name = "Insurance Record"
         verbose_name_plural = "Insurance Records"
+
+    def clean(self):
+        super().clean()
+        if self.policy_number:
+            self.policy_number = self.policy_number.strip()
+            if not self.policy_number:
+                raise ValidationError({"policy_number": "Policy number cannot be empty."})
+
+            qs = InsuranceRecord.objects.filter(policy_number__iexact=self.policy_number)
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                existing = qs.select_related("customer", "vehicle").first()
+                cust_info = existing.customer.name if existing and existing.customer else "another customer"
+                veh_info = f" ({existing.vehicle.vehicle_number})" if existing and existing.vehicle else ""
+                raise ValidationError({
+                    "policy_number": f"Policy number '{self.policy_number}' is already registered to {cust_info}{veh_info}. Policy numbers must be unique."
+                })
+
+    def save(self, *args, **kwargs):
+        if self.policy_number:
+            self.policy_number = self.policy_number.strip()
+        self.clean()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         customer_display = self.customer.name or self.customer.phone

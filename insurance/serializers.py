@@ -190,15 +190,37 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "customer", "vehicle"]
         extra_kwargs = {
+            "policy_number": {"validators": []},
             "insurance_company": {"required": False},
             "entry_date": {"required": False},
             "remarks": {"required": False, "allow_blank": True},
         }
 
     def validate_policy_number(self, value):
+        if not value:
+            raise serializers.ValidationError("Policy number cannot be empty.")
         trimmed = value.strip()
         if not trimmed:
             raise serializers.ValidationError("Policy number cannot be empty.")
+
+        queryset = InsuranceRecord.objects.select_related("customer", "vehicle").filter(
+            policy_number__iexact=trimmed
+        )
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            existing = queryset.first()
+            cust_name = (
+                existing.customer.name
+                if existing and existing.customer and existing.customer.name
+                else existing.customer.phone if existing and existing.customer else "another customer"
+            )
+            veh_num = existing.vehicle.vehicle_number if existing and existing.vehicle else ""
+            veh_info = f" (Vehicle: {veh_num})" if veh_num else ""
+            raise serializers.ValidationError(
+                f"Policy number '{trimmed}' is already registered to {cust_name}{veh_info}. Policy numbers must be unique."
+            )
+
         return trimmed
 
     def validate(self, attrs):
