@@ -1,3 +1,138 @@
-from django.test import TestCase
+from decimal import Decimal
+from django.contrib.auth import get_user_model
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
+from rest_framework.authtoken.models import Token
 
-# Create your tests here.
+from customers.models import Customer
+from insurance.models import InsuranceCompany, InsuranceRecord
+from payments.models import Payment
+from vehicles.models import Vehicle
+
+User = get_user_model()
+
+
+class DashboardSummaryApiTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testadmin",
+            email="admin@test.com",
+            password="testpassword123",
+        )
+        self.token = Token.objects.create(user=self.user)
+        self.url = reverse("dashboard-summary")
+
+        # Create Company
+        self.company1 = InsuranceCompany.objects.create(name="HDFC ERGO", is_active=True)
+        self.company2 = InsuranceCompany.objects.create(name="ICICI Lombard", is_active=True)
+
+        # Create Customer & Vehicle
+        self.customer = Customer.objects.create(
+            name="Rajesh Kumar", phone="9876543210", email="rajesh@test.com"
+        )
+        self.vehicle1 = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH-12-AB-1234", vehicle_type="Car"
+        )
+        self.vehicle2 = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="DL-08-CD-5678", vehicle_type="Bike"
+        )
+
+        today = timezone.localdate()
+
+        # Record 1: Paid in full
+        self.rec1 = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle1,
+            insurance_company=self.company1,
+            policy_number="POL-1001",
+            entry_date=today,
+            policy_start_date=today,
+            policy_expiry_date=today + timezone.timedelta(days=365),
+            total_premium=Decimal("12500.00"),
+        )
+        Payment.objects.create(
+            insurance_record=self.rec1,
+            amount=Decimal("12500.00"),
+            payment_date=today,
+            payment_method="Cash",
+        )
+
+        # Record 2: Partial payment
+        self.rec2 = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle2,
+            insurance_company=self.company2,
+            policy_number="POL-1002",
+            entry_date=today,
+            policy_start_date=today,
+            policy_expiry_date=today + timezone.timedelta(days=365),
+            total_premium=Decimal("8200.00"),
+        )
+        Payment.objects.create(
+            insurance_record=self.rec2,
+            amount=Decimal("4000.00"),
+            payment_date=today,
+            payment_method="Online",
+        )
+
+        # Record 3: Completely outstanding (no payments)
+        self.rec3 = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle1,
+            insurance_company=self.company1,
+            policy_number="POL-1003",
+            entry_date=today,
+            policy_start_date=today,
+            policy_expiry_date=today + timezone.timedelta(days=365),
+            total_premium=Decimal("15000.00"),
+        )
+
+    def test_unauthenticated_access_denied(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_dashboard_summary_success(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+
+        # Verify response structure
+        self.assertIn("kpis", data)
+        self.assertIn("business_summary", data)
+        self.assertIn("payment_status_summary", data)
+        self.assertIn("company_wise_summary", data)
+        self.assertIn("recent_records", data)
+
+        # Verify KPIs
+        kpis = data["kpis"]
+        self.assertEqual(kpis["today_entries"], 3)
+        # Total premium today = 12500 + 8200 + 15000 = 35700
+        self.assertEqual(kpis["today_premium"], 35700.0)
+        # Total received today = 12500 + 4000 = 16500
+        self.assertEqual(kpis["today_received"], 16500.0)
+        # Total outstanding = 35700 - 16500 = 19200
+        self.assertEqual(kpis["total_outstanding"], 19200.0)
+        self.assertEqual(kpis["total_policies"], 3)
+
+        # Verify Payment Status Summary (1 Paid, 1 Partial, 1 Outstanding)
+        status_summary = data["payment_status_summary"]
+        self.assertEqual(status_summary["total_policies"], 3)
+        self.assertEqual(status_summary["paid"]["count"], 1)
+        self.assertEqual(status_summary["partial"]["count"], 1)
+        self.assertEqual(status_summary["outstanding"]["count"], 1)
+
+        # Verify Company Wise Summary
+        companies = data["company_wise_summary"]
+        self.assertTrue(len(companies) >= 2)
+        company_names = [c["company_name"] for c in companies]
+        self.assertIn("HDFC ERGO", company_names)
+        self.assertIn("ICICI Lombard", company_names)
+
+        # Verify Recent Records
+        recent = data["recent_records"]
+        self.assertEqual(len(recent), 3)
+        self.assertEqual(recent[0]["policy_number"], "POL-1003")
