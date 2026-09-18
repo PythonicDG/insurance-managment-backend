@@ -39,21 +39,43 @@ class DashboardSummaryView(APIView):
             months_count = 6
         months_count = max(1, min(months_count, 24))
 
+        # Parse date filter parameters
+        start_date_param = request.query_params.get("start_date", "").strip()
+        end_date_param = request.query_params.get("end_date", "").strip()
+
+        start_date = None
+        end_date = None
+        is_all_time = False
+
+        if start_date_param.lower() in ["all", "all_time"] or request.query_params.get("filter") == "all":
+            is_all_time = True
+        elif start_date_param:
+            try:
+                start_date = date.fromisoformat(start_date_param)
+            except ValueError:
+                start_date = today
+            if end_date_param:
+                try:
+                    end_date = date.fromisoformat(end_date_param)
+                except ValueError:
+                    end_date = start_date
+            else:
+                end_date = start_date
+        elif end_date_param:
+            try:
+                end_date = date.fromisoformat(end_date_param)
+                start_date = end_date
+            except ValueError:
+                start_date = today
+                end_date = today
+        else:
+            # Default to today
+            start_date = today
+            end_date = today
+
         # ---------------------------------------------------------------------
         # 1. Top KPI Metrics
         # ---------------------------------------------------------------------
-        today_entries = InsuranceRecord.objects.filter(entry_date=today).count()
-
-        today_premium_aggr = InsuranceRecord.objects.filter(entry_date=today).aggregate(
-            total=Coalesce(Sum("total_premium"), Decimal("0.00"), output_field=DecimalField())
-        )
-        today_premium = float(today_premium_aggr["total"] or Decimal("0.00"))
-
-        today_received_aggr = Payment.objects.filter(payment_date=today).aggregate(
-            total=Coalesce(Sum("amount"), Decimal("0.00"), output_field=DecimalField())
-        )
-        today_received = float(today_received_aggr["total"] or Decimal("0.00"))
-
         all_premium_aggr = InsuranceRecord.objects.aggregate(
             total=Coalesce(Sum("total_premium"), Decimal("0.00"), output_field=DecimalField())
         )
@@ -64,31 +86,74 @@ class DashboardSummaryView(APIView):
         )
         all_received = all_received_aggr["total"] or Decimal("0.00")
 
-        total_outstanding_dec = max(Decimal("0.00"), all_premium - all_received)
-        total_outstanding = float(total_outstanding_dec)
+        all_outstanding_dec = max(Decimal("0.00"), all_premium - all_received)
+        all_outstanding = float(all_outstanding_dec)
+
+        if not is_all_time and start_date and end_date:
+            period_records = InsuranceRecord.objects.filter(entry_date__gte=start_date, entry_date__lte=end_date)
+            period_payments = Payment.objects.filter(payment_date__gte=start_date, payment_date__lte=end_date)
+
+            entries_count = period_records.count()
+            period_premium_aggr = period_records.aggregate(
+                total=Coalesce(Sum("total_premium"), Decimal("0.00"), output_field=DecimalField())
+            )
+            period_premium = float(period_premium_aggr["total"] or Decimal("0.00"))
+
+            period_received_aggr = period_payments.aggregate(
+                total=Coalesce(Sum("amount"), Decimal("0.00"), output_field=DecimalField())
+            )
+            period_received = float(period_received_aggr["total"] or Decimal("0.00"))
+
+            # Outstanding for the records created in this period
+            period_records_paid_aggr = period_records.aggregate(
+                total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
+            )
+            period_records_paid = period_records_paid_aggr["total"] or Decimal("0.00")
+            period_outstanding = float(max(Decimal("0.00"), (period_premium_aggr["total"] or Decimal("0.00")) - period_records_paid))
+        else:
+            entries_count = InsuranceRecord.objects.count()
+            period_premium = float(all_premium)
+            period_received = float(all_received)
+            period_outstanding = all_outstanding
 
         total_policies = InsuranceRecord.objects.count()
 
         kpis = {
-            "today_entries": today_entries,
-            "today_premium": today_premium,
-            "today_received": today_received,
-            "total_outstanding": total_outstanding,
+            "today_entries": entries_count,
+            "today_premium": period_premium,
+            "today_received": period_received,
+            "total_outstanding": period_outstanding,
+            "all_time_outstanding": all_outstanding,
             "total_policies": total_policies,
             "total_premium": float(all_premium),
             "total_received": float(all_received),
+            "filter_start_date": str(start_date) if start_date else None,
+            "filter_end_date": str(end_date) if end_date else None,
+            "is_all_time": is_all_time,
         }
 
         # ---------------------------------------------------------------------
-        # 2. Business Summary (Monthly trend for last N months)
+        # 2. Business Summary (Monthly trend)
         # ---------------------------------------------------------------------
         month_slots = []
-        cur_year = today.year
-        cur_month = today.month
+        if not is_all_time and start_date and end_date:
+            diff_months = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month) + 1
+            if diff_months > 1:
+                trend_months = min(max(diff_months, 1), 24)
+                ref_year = end_date.year
+                ref_month = end_date.month
+            else:
+                trend_months = months_count
+                ref_year = end_date.year
+                ref_month = end_date.month
+        else:
+            trend_months = months_count
+            ref_year = today.year
+            ref_month = today.month
 
-        for i in range(months_count - 1, -1, -1):
-            target_year = cur_year
-            target_month = cur_month - i
+        for i in range(trend_months - 1, -1, -1):
+            target_year = ref_year
+            target_month = ref_month - i
             while target_month <= 0:
                 target_month += 12
                 target_year -= 1
@@ -160,7 +225,12 @@ class DashboardSummaryView(APIView):
         # ---------------------------------------------------------------------
         # 3. Payment Status Summary (Donut Chart: Paid, Partial, Outstanding)
         # ---------------------------------------------------------------------
-        records_with_payments = InsuranceRecord.objects.annotate(
+        if not is_all_time and start_date and end_date:
+            base_status_records = InsuranceRecord.objects.filter(entry_date__gte=start_date, entry_date__lte=end_date)
+        else:
+            base_status_records = InsuranceRecord.objects.all()
+
+        records_with_payments = base_status_records.annotate(
             paid_sum=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
         )
 
@@ -207,7 +277,7 @@ class DashboardSummaryView(APIView):
             },
             "outstanding": {
                 "count": outstanding_cnt,
-                "amount": total_outstanding,
+                "amount": period_outstanding,
                 "percentage": outstanding_pct,
             },
         }
@@ -215,32 +285,52 @@ class DashboardSummaryView(APIView):
         # ---------------------------------------------------------------------
         # 4. Insurance Company-Wise Premium Collection (The requested graph)
         # ---------------------------------------------------------------------
-        companies = (
-            InsuranceCompany.objects.filter(is_active=True)
-            .annotate(
-                policy_count=Count("insurance_records", distinct=True),
-                total_premium_sum=Coalesce(
-                    Sum("insurance_records__total_premium"),
-                    Decimal("0.00"),
-                    output_field=DecimalField(),
-                ),
-                collected_sum=Coalesce(
-                    Sum("insurance_records__payments__amount"),
-                    Decimal("0.00"),
-                    output_field=DecimalField(),
-                ),
+        if not is_all_time and start_date and end_date:
+            rec_filter = Q(insurance_records__entry_date__gte=start_date, insurance_records__entry_date__lte=end_date)
+            companies = (
+                InsuranceCompany.objects.filter(is_active=True)
+                .annotate(
+                    policy_count=Count("insurance_records", filter=rec_filter, distinct=True),
+                    total_premium_sum=Coalesce(
+                        Sum("insurance_records__total_premium", filter=rec_filter),
+                        Decimal("0.00"),
+                        output_field=DecimalField(),
+                    ),
+                    collected_sum=Coalesce(
+                        Sum("insurance_records__payments__amount", filter=rec_filter),
+                        Decimal("0.00"),
+                        output_field=DecimalField(),
+                    ),
+                )
+                .order_by("-total_premium_sum", "name")
             )
-            .order_by("-total_premium_sum", "name")
-        )
-
-        overall_premium_float = float(all_premium) if all_premium > 0 else 1.0
+            context_premium = period_premium if period_premium > 0 else 1.0
+        else:
+            companies = (
+                InsuranceCompany.objects.filter(is_active=True)
+                .annotate(
+                    policy_count=Count("insurance_records", distinct=True),
+                    total_premium_sum=Coalesce(
+                        Sum("insurance_records__total_premium"),
+                        Decimal("0.00"),
+                        output_field=DecimalField(),
+                    ),
+                    collected_sum=Coalesce(
+                        Sum("insurance_records__payments__amount"),
+                        Decimal("0.00"),
+                        output_field=DecimalField(),
+                    ),
+                )
+                .order_by("-total_premium_sum", "name")
+            )
+            context_premium = float(all_premium) if all_premium > 0 else 1.0
 
         company_wise_summary = []
         for c in companies:
             c_prem = float(c.total_premium_sum or Decimal("0.00"))
             c_coll = float(c.collected_sum or Decimal("0.00"))
             c_out = max(0.0, c_prem - c_coll)
-            c_share = min(100.0, round((c_prem / overall_premium_float * 100), 1)) if overall_premium_float > 0 else 0.0
+            c_share = min(100.0, round((c_prem / context_premium * 100), 1)) if context_premium > 0 else 0.0
             collection_rate = round((c_coll / c_prem * 100), 1) if c_prem > 0 else 0.0
 
             # Include companies that have policies or were recently active
@@ -257,13 +347,23 @@ class DashboardSummaryView(APIView):
                 })
 
         # ---------------------------------------------------------------------
-        # 5. Recent Insurance Records (Latest 6-8 records matching UI screenshot)
+        # 5. Recent Insurance Records (Latest records matching filter)
         # ---------------------------------------------------------------------
-        recent_qs = (
+        recent_base = (
             InsuranceRecord.objects.select_related("customer", "vehicle", "insurance_company")
             .prefetch_related("payments")
-            .order_by("-entry_date", "-created_at", "-id")[:10]
         )
+        if not is_all_time and start_date and end_date:
+            period_recent = list(
+                recent_base.filter(entry_date__gte=start_date, entry_date__lte=end_date)
+                .order_by("-entry_date", "-created_at", "-id")[:10]
+            )
+            if period_recent:
+                recent_qs = period_recent
+            else:
+                recent_qs = recent_base.order_by("-entry_date", "-created_at", "-id")[:10]
+        else:
+            recent_qs = recent_base.order_by("-entry_date", "-created_at", "-id")[:10]
 
         recent_records = []
         for rec in recent_qs:

@@ -136,3 +136,26 @@ class DashboardSummaryApiTests(APITestCase):
         recent = data["recent_records"]
         self.assertEqual(len(recent), 3)
         self.assertEqual(recent[0]["policy_number"], "POL-1003")
+
+    def test_dashboard_summary_date_filtering(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        today = timezone.localdate()
+        yesterday = today - timezone.timedelta(days=1)
+
+        # Filter for yesterday (should have 0 entries)
+        response = self.client.get(self.url, {"start_date": str(yesterday), "end_date": str(yesterday)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        kpis = response.data["kpis"]
+        self.assertEqual(kpis["today_entries"], 0)
+        self.assertEqual(kpis["today_premium"], 0.0)
+        self.assertEqual(kpis["today_received"], 0.0)
+        self.assertEqual(kpis["total_outstanding"], 0.0)
+
+        # Filter for today (should have 3 entries)
+        response_today = self.client.get(self.url, {"start_date": str(today), "end_date": str(today)})
+        self.assertEqual(response_today.status_code, status.HTTP_200_OK)
+        kpis_today = response_today.data["kpis"]
+        self.assertEqual(kpis_today["today_entries"], 3)
+        self.assertEqual(kpis_today["today_premium"], 35700.0)
+        self.assertEqual(kpis_today["today_received"], 16500.0)
+        self.assertEqual(kpis_today["total_outstanding"], 19200.0)

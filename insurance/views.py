@@ -110,6 +110,11 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 | Q(remarks__icontains=search)
             )
 
+        # Explicit vehicle number filter
+        vehicle_number = params.get("vehicle_number", "").strip()
+        if vehicle_number:
+            queryset = queryset.filter(vehicle__vehicle_number__icontains=vehicle_number)
+
         # 2. Foreign Key Filters
         customer_id = params.get("customer_id") or params.get("customer")
         if customer_id:
