@@ -1,8 +1,9 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from .views import PaymentViewSet
+from .views import LedgerViewSet, PaymentViewSet
 
 router = DefaultRouter()
+router.register(r"ledger", LedgerViewSet, basename="payment-ledger")
 router.register(r"", PaymentViewSet, basename="payment")
 
 urlpatterns = [

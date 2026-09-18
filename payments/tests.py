@@ -601,3 +601,177 @@ class PaymentTransactionHistoryTestCase(APITestCase):
         self.assertIn("POL-FILTER-PAID", policies_f)
         self.assertNotIn("POL-FILTER-UNPAID", policies_f)
         self.assertNotIn("POL-FILTER-PARTIAL", policies_f)
+
+
+class LedgerApiTestCase(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="ledger_tester", password="password123", email="ledger@example.com"
+        )
+        self.client.force_authenticate(user=self.user)
+
+        self.company1 = InsuranceCompany.objects.create(name="HDFC ERGO")
+        self.company2 = InsuranceCompany.objects.create(name="ICICI Lombard")
+
+        self.today = timezone.localdate()
+        self.next_year = self.today + datetime.timedelta(days=365)
+
+        self.c1 = Customer.objects.create(name="Rajesh Kumar", phone="9876543210")
+        self.v1 = Vehicle.objects.create(customer=self.c1, vehicle_number="MH12AB4821")
+
+        self.c2 = Customer.objects.create(name="Priya Sharma", phone="9820477126")
+        self.v2 = Vehicle.objects.create(customer=self.c2, vehicle_number="MH14KT9032")
+
+        self.c3 = Customer.objects.create(name="Amit Patel", phone="9898021456")
+        self.v3 = Vehicle.objects.create(customer=self.c3, vehicle_number="GJ01RK7319")
+
+        # Record 1: Rajesh - HDFC - 1,28,500 total, 18,500 paid -> 1,10,000 outstanding (Partial)
+        self.r1 = InsuranceRecord.objects.create(
+            customer=self.c1,
+            vehicle=self.v1,
+            insurance_company=self.company1,
+            policy_number="POL-LEDGER-001",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("128500.00"),
+            entry_date=self.today,
+        )
+        Payment.objects.create(
+            insurance_record=self.r1,
+            amount=Decimal("18500.00"),
+            payment_method="UPI",
+            payment_date=self.today,
+            notes="Initial token payment",
+        )
+
+        # Record 2: Priya - ICICI - 92,400 total, 0 paid -> 92,400 outstanding (Outstanding)
+        self.r2 = InsuranceRecord.objects.create(
+            customer=self.c2,
+            vehicle=self.v2,
+            insurance_company=self.company2,
+            policy_number="POL-LEDGER-002",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("92400.00"),
+            entry_date=self.today,
+        )
+
+        # Record 3: Amit - HDFC - 50,000 total, 50,000 paid -> 0 outstanding (Paid)
+        self.r3 = InsuranceRecord.objects.create(
+            customer=self.c3,
+            vehicle=self.v3,
+            insurance_company=self.company1,
+            policy_number="POL-LEDGER-003",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("50000.00"),
+            entry_date=self.today,
+        )
+        Payment.objects.create(
+            insurance_record=self.r3,
+            amount=Decimal("50000.00"),
+            payment_method="Net Banking",
+            payment_date=self.today,
+            notes="Full premium payment",
+        )
+
+    def test_ledger_list_and_kpis(self):
+        """Verify GET /api/payments/ledger/ returns KPI summary and pending records by default."""
+        res = self.client.get("/api/payments/ledger/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        summary = res.data.get("summary", {})
+        # Total premium across records = 128500 + 92400 + 50000 = 270900
+        self.assertEqual(summary.get("total_premium"), 270900.0)
+        # Total received = 18500 + 50000 = 68500
+        self.assertEqual(summary.get("total_received"), 68500.0)
+        # Total outstanding = 110000 + 92400 = 202400
+        self.assertEqual(summary.get("total_outstanding"), 202400.0)
+        # Pending customers = Rajesh and Priya = 2
+        self.assertEqual(summary.get("total_customers_pending"), 2)
+
+        results = res.data.get("results", [])
+        # Default payment_status is 'outstanding_partial', so Paid record should be excluded from results
+        self.assertEqual(len(results), 2)
+        policy_numbers = [item["policy_number"] for item in results]
+        self.assertIn("POL-LEDGER-001", policy_numbers)
+        self.assertIn("POL-LEDGER-002", policy_numbers)
+        self.assertNotIn("POL-LEDGER-003", policy_numbers)
+
+        # Check fields on record
+        r1_data = next(item for item in results if item["policy_number"] == "POL-LEDGER-001")
+        self.assertEqual(r1_data["customer_name"], "Rajesh Kumar")
+        self.assertEqual(r1_data["vehicle_number"], "MH12AB4821")
+        self.assertEqual(r1_data["insurance_company_name"], "HDFC ERGO")
+        self.assertEqual(float(r1_data["paid_amount"]), 18500.0)
+        self.assertEqual(float(r1_data["outstanding"]), 110000.0)
+        self.assertEqual(r1_data["status"], "Partial")
+
+    def test_ledger_search_filter(self):
+        """Verify search by customer name, phone, or vehicle number."""
+        res = self.client.get("/api/payments/ledger/?search=Priya")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.data.get("results", [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["policy_number"], "POL-LEDGER-002")
+
+        res2 = self.client.get("/api/payments/ledger/?search=MH12")
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        results2 = res2.data.get("results", [])
+        self.assertEqual(len(results2), 1)
+        self.assertEqual(results2[0]["policy_number"], "POL-LEDGER-001")
+
+    def test_ledger_payment_status_filter(self):
+        """Verify filtering by payment status choices."""
+        # Query ALL statuses
+        res_all = self.client.get("/api/payments/ledger/?payment_status=all")
+        self.assertEqual(res_all.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_all.data.get("results", [])), 3)
+
+        # Query Outstanding (Unpaid) only
+        res_out = self.client.get("/api/payments/ledger/?payment_status=outstanding")
+        self.assertEqual(res_out.status_code, status.HTTP_200_OK)
+        results_out = res_out.data.get("results", [])
+        self.assertEqual(len(results_out), 1)
+        self.assertEqual(results_out[0]["policy_number"], "POL-LEDGER-002")
+
+        # Query Partial only
+        res_part = self.client.get("/api/payments/ledger/?payment_status=partial")
+        self.assertEqual(res_part.status_code, status.HTTP_200_OK)
+        results_part = res_part.data.get("results", [])
+        self.assertEqual(len(results_part), 1)
+        self.assertEqual(results_part[0]["policy_number"], "POL-LEDGER-001")
+
+        # Query Paid only
+        res_paid = self.client.get("/api/payments/ledger/?payment_status=paid")
+        self.assertEqual(res_paid.status_code, status.HTTP_200_OK)
+        results_paid = res_paid.data.get("results", [])
+        self.assertEqual(len(results_paid), 1)
+        self.assertEqual(results_paid[0]["policy_number"], "POL-LEDGER-003")
+
+    def test_ledger_company_filter(self):
+        """Verify filtering by insurance company."""
+        res = self.client.get(f"/api/payments/ledger/?insurance_company_id={self.company2.id}")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.data.get("results", [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["policy_number"], "POL-LEDGER-002")
+
+    def test_ledger_summary_endpoint(self):
+        """Verify GET /api/payments/ledger/summary/."""
+        res = self.client.get("/api/payments/ledger/summary/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get("total_premium"), 270900.0)
+        self.assertEqual(res.data.get("total_received"), 68500.0)
+        self.assertEqual(res.data.get("total_outstanding"), 202400.0)
+        self.assertEqual(res.data.get("total_customers_pending"), 2)
+
+    def test_ledger_retrieve_detail_endpoint(self):
+        """Verify GET /api/payments/ledger/<id>/ returns record + payment history."""
+        res = self.client.get(f"/api/payments/ledger/{self.r1.id}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["policy_number"], "POL-LEDGER-001")
+        self.assertIn("payments", res.data)
+        self.assertEqual(len(res.data["payments"]), 1)
+        self.assertEqual(float(res.data["payments"][0]["amount"]), 18500.0)
+

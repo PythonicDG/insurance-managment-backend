@@ -62,3 +62,60 @@ class PaymentSerializer(serializers.ModelSerializer):
         if value <= Decimal("0.00"):
             raise serializers.ValidationError("Payment amount must be greater than zero.")
         return value
+
+
+class LedgerRecordSerializer(serializers.ModelSerializer):
+    customer_id = serializers.IntegerField(source="customer.id", read_only=True)
+    customer_name = serializers.CharField(source="customer.name", read_only=True)
+    customer_phone = serializers.CharField(source="customer.phone", read_only=True)
+    customer_email = serializers.CharField(source="customer.email", read_only=True)
+    vehicle_id = serializers.IntegerField(source="vehicle.id", read_only=True)
+    vehicle_number = serializers.CharField(source="vehicle.vehicle_number", read_only=True)
+    vehicle_type = serializers.CharField(source="vehicle.vehicle_type", read_only=True)
+    insurance_company_id = serializers.IntegerField(source="insurance_company.id", read_only=True)
+    insurance_company_name = serializers.CharField(source="insurance_company.name", read_only=True)
+    paid_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, source="annotated_paid", read_only=True
+    )
+    outstanding = serializers.DecimalField(
+        max_digits=12, decimal_places=2, source="annotated_outstanding", read_only=True
+    )
+    status = serializers.CharField(source="annotated_status", read_only=True)
+    payment_status = serializers.CharField(read_only=True)
+    payments_count = serializers.IntegerField(source="payments.count", read_only=True)
+
+    class Meta:
+        model = InsuranceRecord
+        fields = [
+            "id",
+            "policy_number",
+            "entry_date",
+            "policy_start_date",
+            "policy_expiry_date",
+            "total_premium",
+            "paid_amount",
+            "outstanding",
+            "status",
+            "payment_status",
+            "customer_id",
+            "customer_name",
+            "customer_phone",
+            "customer_email",
+            "vehicle_id",
+            "vehicle_number",
+            "vehicle_type",
+            "insurance_company_id",
+            "insurance_company_name",
+            "payments_count",
+            "remarks",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class LedgerSummarySerializer(serializers.Serializer):
+    total_outstanding = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_customers_pending = serializers.IntegerField()
+    total_received = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_premium = serializers.DecimalField(max_digits=14, decimal_places=2)
+
