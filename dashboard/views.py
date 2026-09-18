@@ -236,9 +236,8 @@ class DashboardSummaryView(APIView):
                 start_date = today
                 end_date = today
         else:
-            # Default to today
-            start_date = today
-            end_date = today
+            # Default to all-time data
+            is_all_time = True
 
         # ---------------------------------------------------------------------
         # 1. Top KPI Metrics

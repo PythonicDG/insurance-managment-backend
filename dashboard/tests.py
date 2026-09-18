@@ -109,6 +109,7 @@ class DashboardSummaryApiTests(APITestCase):
 
         # Verify KPIs
         kpis = data["kpis"]
+        self.assertTrue(kpis["is_all_time"])
         self.assertEqual(kpis["today_entries"], 3)
         # Total premium today = 12500 + 8200 + 15000 = 35700
         self.assertEqual(kpis["today_premium"], 35700.0)
@@ -136,6 +137,41 @@ class DashboardSummaryApiTests(APITestCase):
         recent = data["recent_records"]
         self.assertEqual(len(recent), 3)
         self.assertEqual(recent[0]["policy_number"], "POL-1003")
+
+    def test_dashboard_summary_default_is_all_time(self):
+        """
+        Verify that requests without date parameters include records from all dates
+        by default rather than only today's records.
+        """
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        past_date = timezone.localdate() - timezone.timedelta(days=10)
+        # Create a record in the past
+        rec_past = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle1,
+            insurance_company=self.company1,
+            policy_number="POL-PAST-1",
+            entry_date=past_date,
+            policy_start_date=past_date,
+            policy_expiry_date=past_date + timezone.timedelta(days=365),
+            total_premium=Decimal("5000.00"),
+        )
+        Payment.objects.create(
+            insurance_record=rec_past,
+            amount=Decimal("5000.00"),
+            payment_date=past_date,
+            payment_method="Cash",
+        )
+
+        # Request without any date params
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        kpis = response.data["kpis"]
+        self.assertTrue(kpis["is_all_time"])
+        # Should include all 4 records (3 from today + 1 from past)
+        self.assertEqual(kpis["today_entries"], 4)
+        self.assertEqual(kpis["today_premium"], 40700.0)
+        self.assertEqual(kpis["today_received"], 21500.0)
 
     def test_dashboard_summary_date_filtering(self):
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
