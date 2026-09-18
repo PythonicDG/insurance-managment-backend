@@ -73,14 +73,93 @@ class CustomerAPITests(TestCase):
         self.assertEqual(results2[0]["name"], "John Doe")
 
     def test_customer_details(self):
+        from insurance.models import InsuranceCompany, InsuranceRecord, InsuranceDocument
+        from payments.models import Payment
+        from django.utils import timezone
+
+        company = InsuranceCompany.objects.create(name="HDFC ERGO")
+        record = InsuranceRecord.objects.create(
+            customer=self.customer1,
+            vehicle=self.vehicle1,
+            insurance_company=company,
+            policy_number="POL-TEST-001",
+            policy_start_date=timezone.localdate(),
+            policy_expiry_date=timezone.localdate() + timezone.timedelta(days=365),
+            total_premium=10000.00,
+        )
+        Payment.objects.create(
+            insurance_record=record,
+            amount=4000.00,
+            payment_method="Cash",
+        )
+        InsuranceDocument.objects.create(
+            record=record,
+            document_name="PolicyDoc.pdf",
+        )
+
         response = self.client.get(f"/api/customers/{self.customer1.id}/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         data = response.json()
         self.assertEqual(data["name"], "John Doe")
         self.assertEqual(data["vehicles_count"], 1)
+        self.assertEqual(data["total_records"], 1)
+        self.assertEqual(float(data["total_premium"]), 10000.00)
+        self.assertEqual(float(data["total_paid"]), 4000.00)
+        self.assertEqual(float(data["total_outstanding"]), 6000.00)
         self.assertIn("vehicles", data)
         self.assertEqual(len(data["vehicles"]), 1)
         self.assertEqual(data["vehicles"][0]["vehicle_number"], "MH12AB1234")
+        self.assertEqual(data["vehicles"][0]["records_count"], 1)
+
+    def test_customer_records_action(self):
+        from insurance.models import InsuranceCompany, InsuranceRecord
+        from django.utils import timezone
+
+        company = InsuranceCompany.objects.create(name="Bajaj Allianz")
+        record = InsuranceRecord.objects.create(
+            customer=self.customer1,
+            vehicle=self.vehicle1,
+            insurance_company=company,
+            policy_number="POL-TEST-002",
+            policy_start_date=timezone.localdate(),
+            policy_expiry_date=timezone.localdate() + timezone.timedelta(days=365),
+            total_premium=15000.00,
+        )
+
+        response = self.client.get(f"/api/customers/{self.customer1.id}/records/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        records = response.json()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["policy_number"], "POL-TEST-002")
+        self.assertEqual(records[0]["insurance_company"]["name"], "Bajaj Allianz")
+
+    def test_customer_documents_action(self):
+        from insurance.models import InsuranceCompany, InsuranceRecord, InsuranceDocument
+        from django.utils import timezone
+
+        company = InsuranceCompany.objects.create(name="Tata AIG")
+        record = InsuranceRecord.objects.create(
+            customer=self.customer1,
+            vehicle=self.vehicle1,
+            insurance_company=company,
+            policy_number="POL-TEST-003",
+            policy_start_date=timezone.localdate(),
+            policy_expiry_date=timezone.localdate() + timezone.timedelta(days=365),
+            total_premium=20000.00,
+        )
+        InsuranceDocument.objects.create(
+            record=record,
+            document_name="VehicleRC.pdf",
+        )
+
+        response = self.client.get(f"/api/customers/{self.customer1.id}/documents/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        docs = response.json()
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["document_name"], "VehicleRC.pdf")
+        self.assertEqual(docs[0]["policy_number"], "POL-TEST-003")
+        self.assertEqual(docs[0]["vehicle_number"], "MH12AB1234")
+        self.assertEqual(docs[0]["company_name"], "Tata AIG")
 
     def test_customer_update_patch(self):
         update_data = {
@@ -98,11 +177,26 @@ class CustomerAPITests(TestCase):
         self.assertEqual(self.customer1.address, "789 New St")
 
     def test_customer_vehicles_action(self):
+        from insurance.models import InsuranceCompany, InsuranceRecord
+        from django.utils import timezone
+
+        company = InsuranceCompany.objects.create(name="ICICI Lombard")
+        InsuranceRecord.objects.create(
+            customer=self.customer1,
+            vehicle=self.vehicle1,
+            insurance_company=company,
+            policy_number="POL-TEST-004",
+            policy_start_date=timezone.localdate(),
+            policy_expiry_date=timezone.localdate() + timezone.timedelta(days=365),
+            total_premium=5000.00,
+        )
+
         response = self.client.get(f"/api/customers/{self.customer1.id}/vehicles/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         vehicles = response.json()
         self.assertEqual(len(vehicles), 1)
         self.assertEqual(vehicles[0]["vehicle_number"], "MH12AB1234")
+        self.assertEqual(vehicles[0]["records_count"], 1)
 
     def test_customer_create_post(self):
         # Direct POST creation should succeed and normalize phone
