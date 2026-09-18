@@ -159,3 +159,38 @@ class DashboardSummaryApiTests(APITestCase):
         self.assertEqual(kpis_today["today_premium"], 35700.0)
         self.assertEqual(kpis_today["today_received"], 16500.0)
         self.assertEqual(kpis_today["total_outstanding"], 19200.0)
+
+    def test_business_summary_fixed_6_months_with_12_month_date_filter(self):
+        """
+        Ensure that applying a 12-month date filter at the top does NOT cause
+        business_summary to return 12 items. It must strictly return 6 items.
+        """
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        response = self.client.get(self.url, {"start_date": "2024-01-01", "end_date": "2024-12-31"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["business_summary"]), 6)
+
+    def test_dashboard_business_summary_endpoint(self):
+        """
+        Test the dedicated DashboardBusinessSummaryView endpoint.
+        """
+        url = reverse("dashboard-business-summary")
+        # Unauthorized access
+        res_unauth = self.client.get(url)
+        self.assertEqual(res_unauth.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Authenticated access defaults to 6 months
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        res_auth = self.client.get(url)
+        self.assertEqual(res_auth.status_code, status.HTTP_200_OK)
+        self.assertIn("business_summary", res_auth.data)
+        self.assertEqual(len(res_auth.data["business_summary"]), 6)
+
+        # Query explicit 6-month window
+        res_custom = self.client.get(url, {"start_month": "2024-01", "end_month": "2024-06"})
+        self.assertEqual(res_custom.status_code, status.HTTP_200_OK)
+        custom_summary = res_custom.data["business_summary"]
+        self.assertEqual(len(custom_summary), 6)
+        expected_keys = ["2024-01", "2024-02", "2024-03", "2024-04", "2024-05", "2024-06"]
+        self.assertEqual([item["month_key"] for item in custom_summary], expected_keys)
+

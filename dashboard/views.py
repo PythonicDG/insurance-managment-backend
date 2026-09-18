@@ -21,6 +21,173 @@ from insurance.models import InsuranceCompany, InsuranceRecord
 from payments.models import Payment
 
 
+def calculate_business_summary(
+    start_date=None,
+    end_date=None,
+    start_month=None,
+    end_month=None,
+    months_count=6,
+    ref_year=None,
+    ref_month=None,
+):
+    """
+    Computes monthly business summary (collected premium and outstanding amounts)
+    strictly bounded to a maximum 6-month span to maintain visual harmony in the chart.
+    """
+    today = timezone.localdate()
+    month_slots = []
+
+    parsed_start = None
+    parsed_end = None
+
+    if start_month:
+        try:
+            parts = [int(p) for p in str(start_month).strip().split("-")]
+            if len(parts) == 2 and 1 <= parts[1] <= 12:
+                parsed_start = (parts[0], parts[1])
+        except (ValueError, TypeError):
+            pass
+
+    if end_month:
+        try:
+            parts = [int(p) for p in str(end_month).strip().split("-")]
+            if len(parts) == 2 and 1 <= parts[1] <= 12:
+                parsed_end = (parts[0], parts[1])
+        except (ValueError, TypeError):
+            pass
+
+    if not parsed_start and start_date:
+        if isinstance(start_date, str):
+            try:
+                sd = date.fromisoformat(start_date)
+                parsed_start = (sd.year, sd.month)
+            except ValueError:
+                pass
+        elif isinstance(start_date, date):
+            parsed_start = (start_date.year, start_date.month)
+
+    if not parsed_end and end_date:
+        if isinstance(end_date, str):
+            try:
+                ed = date.fromisoformat(end_date)
+                parsed_end = (ed.year, ed.month)
+            except ValueError:
+                pass
+        elif isinstance(end_date, date):
+            parsed_end = (end_date.year, end_date.month)
+
+    if parsed_start and parsed_end:
+        cur_y, cur_m = parsed_start
+        end_y, end_m = parsed_end
+        if (cur_y, cur_m) > (end_y, end_m):
+            cur_y, cur_m, end_y, end_m = end_y, end_m, cur_y, cur_m
+
+        slots_temp = []
+        while (cur_y, cur_m) <= (end_y, end_m) and len(slots_temp) < 6:
+            _, last_day = monthrange(cur_y, cur_m)
+            slots_temp.append({
+                "year": cur_y,
+                "month": cur_m,
+                "start": date(cur_y, cur_m, 1),
+                "end": date(cur_y, cur_m, last_day),
+                "month_name": date(cur_y, cur_m, 1).strftime("%b"),
+                "month_key": f"{cur_y}-{cur_m:02d}",
+            })
+            cur_m += 1
+            if cur_m > 12:
+                cur_m = 1
+                cur_y += 1
+        month_slots = slots_temp
+
+    if not month_slots:
+        if ref_year is None or ref_month is None:
+            if parsed_end:
+                ref_year, ref_month = parsed_end
+            elif parsed_start:
+                ref_year, ref_month = parsed_start
+                ref_month += (months_count - 1)
+                while ref_month > 12:
+                    ref_month -= 12
+                    ref_year += 1
+            else:
+                ref_year = today.year
+                ref_month = today.month
+
+        months_count = min(max(int(months_count), 1), 6)
+        for i in range(months_count - 1, -1, -1):
+            target_year = ref_year
+            target_month = ref_month - i
+            while target_month <= 0:
+                target_month += 12
+                target_year -= 1
+            _, last_day = monthrange(target_year, target_month)
+            month_slots.append({
+                "year": target_year,
+                "month": target_month,
+                "start": date(target_year, target_month, 1),
+                "end": date(target_year, target_month, last_day),
+                "month_name": date(target_year, target_month, 1).strftime("%b"),
+                "month_key": f"{target_year}-{target_month:02d}",
+            })
+
+    range_start = month_slots[0]["start"]
+    range_end = month_slots[-1]["end"]
+
+    # Aggregate payments in range by month
+    payments_in_range = (
+        Payment.objects.filter(payment_date__gte=range_start, payment_date__lte=range_end)
+        .values("payment_date")
+        .annotate(total_amount=Sum("amount"))
+    )
+
+    payments_by_month_key = {}
+    for p in payments_in_range:
+        p_date = p["payment_date"]
+        key = f"{p_date.year}-{p_date.month:02d}"
+        payments_by_month_key[key] = (
+            payments_by_month_key.get(key, Decimal("0.00")) + (p["total_amount"] or Decimal("0.00"))
+        )
+
+    # Aggregate records in range with their paid sum
+    records_in_range = (
+        InsuranceRecord.objects.filter(entry_date__gte=range_start, entry_date__lte=range_end)
+        .annotate(
+            paid_total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
+        )
+        .values("entry_date", "total_premium", "paid_total")
+    )
+
+    records_by_month_key = {}
+    for r in records_in_range:
+        e_date = r["entry_date"]
+        key = f"{e_date.year}-{e_date.month:02d}"
+        if key not in records_by_month_key:
+            records_by_month_key[key] = {
+                "premium": Decimal("0.00"),
+                "outstanding": Decimal("0.00"),
+            }
+        prem = r["total_premium"] or Decimal("0.00")
+        paid = r["paid_total"] or Decimal("0.00")
+        out = max(Decimal("0.00"), prem - paid)
+        records_by_month_key[key]["premium"] += prem
+        records_by_month_key[key]["outstanding"] += out
+
+    business_summary = []
+    for slot in month_slots:
+        k = slot["month_key"]
+        collected = float(payments_by_month_key.get(k, Decimal("0.00")))
+        outstanding = float(records_by_month_key.get(k, {}).get("outstanding", Decimal("0.00")))
+        business_summary.append({
+            "month": slot["month_name"],
+            "year": slot["year"],
+            "month_key": k,
+            "premium_collected": collected,
+            "outstanding": outstanding,
+        })
+
+    return business_summary
+
+
 class DashboardSummaryView(APIView):
     """
     High-performance dashboard summary API.
@@ -133,94 +300,9 @@ class DashboardSummaryView(APIView):
         }
 
         # ---------------------------------------------------------------------
-        # 2. Business Summary (Monthly trend)
+        # 2. Business Summary (Monthly trend - fixed 6-month span, independent of global filter)
         # ---------------------------------------------------------------------
-        month_slots = []
-        if not is_all_time and start_date and end_date:
-            diff_months = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month) + 1
-            if diff_months > 1:
-                trend_months = min(max(diff_months, 1), 24)
-                ref_year = end_date.year
-                ref_month = end_date.month
-            else:
-                trend_months = months_count
-                ref_year = end_date.year
-                ref_month = end_date.month
-        else:
-            trend_months = months_count
-            ref_year = today.year
-            ref_month = today.month
-
-        for i in range(trend_months - 1, -1, -1):
-            target_year = ref_year
-            target_month = ref_month - i
-            while target_month <= 0:
-                target_month += 12
-                target_year -= 1
-            _, last_day = monthrange(target_year, target_month)
-            month_slots.append({
-                "year": target_year,
-                "month": target_month,
-                "start": date(target_year, target_month, 1),
-                "end": date(target_year, target_month, last_day),
-                "month_name": date(target_year, target_month, 1).strftime("%b"),
-                "month_key": f"{target_year}-{target_month:02d}",
-            })
-
-        range_start = month_slots[0]["start"]
-        range_end = month_slots[-1]["end"]
-
-        # Aggregate payments in range by month
-        payments_in_range = (
-            Payment.objects.filter(payment_date__gte=range_start, payment_date__lte=range_end)
-            .values("payment_date")
-            .annotate(total_amount=Sum("amount"))
-        )
-
-        payments_by_month_key = {}
-        for p in payments_in_range:
-            p_date = p["payment_date"]
-            key = f"{p_date.year}-{p_date.month:02d}"
-            payments_by_month_key[key] = (
-                payments_by_month_key.get(key, Decimal("0.00")) + (p["total_amount"] or Decimal("0.00"))
-            )
-
-        # Aggregate records in range with their paid sum
-        records_in_range = (
-            InsuranceRecord.objects.filter(entry_date__gte=range_start, entry_date__lte=range_end)
-            .annotate(
-                paid_total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
-            )
-            .values("entry_date", "total_premium", "paid_total")
-        )
-
-        records_by_month_key = {}
-        for r in records_in_range:
-            e_date = r["entry_date"]
-            key = f"{e_date.year}-{e_date.month:02d}"
-            if key not in records_by_month_key:
-                records_by_month_key[key] = {
-                    "premium": Decimal("0.00"),
-                    "outstanding": Decimal("0.00"),
-                }
-            prem = r["total_premium"] or Decimal("0.00")
-            paid = r["paid_total"] or Decimal("0.00")
-            out = max(Decimal("0.00"), prem - paid)
-            records_by_month_key[key]["premium"] += prem
-            records_by_month_key[key]["outstanding"] += out
-
-        business_summary = []
-        for slot in month_slots:
-            k = slot["month_key"]
-            collected = float(payments_by_month_key.get(k, Decimal("0.00")))
-            outstanding = float(records_by_month_key.get(k, {}).get("outstanding", Decimal("0.00")))
-            business_summary.append({
-                "month": slot["month_name"],
-                "year": slot["year"],
-                "month_key": k,
-                "premium_collected": collected,
-                "outstanding": outstanding,
-            })
+        business_summary = calculate_business_summary(months_count=6)
 
         # ---------------------------------------------------------------------
         # 3. Payment Status Summary (Donut Chart: Paid, Partial, Outstanding)
@@ -409,3 +491,42 @@ class DashboardSummaryView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class DashboardBusinessSummaryView(APIView):
+    """
+    Dedicated endpoint for the Business Summary chart.
+    Enforces a strict maximum 6-month window so the dual-bar chart never overflows its container.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        start_month = request.query_params.get("start_month")
+        end_month = request.query_params.get("end_month")
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        ref_year = request.query_params.get("ref_year")
+        ref_month = request.query_params.get("ref_month")
+
+        try:
+            ref_year = int(ref_year) if ref_year else None
+        except (ValueError, TypeError):
+            ref_year = None
+
+        try:
+            ref_month = int(ref_month) if ref_month else None
+        except (ValueError, TypeError):
+            ref_month = None
+
+        summary = calculate_business_summary(
+            start_date=start_date,
+            end_date=end_date,
+            start_month=start_month,
+            end_month=end_month,
+            ref_year=ref_year,
+            ref_month=ref_month,
+            months_count=6,
+        )
+        return Response({"business_summary": summary}, status=status.HTTP_200_OK)
+
