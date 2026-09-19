@@ -1,4 +1,6 @@
+import datetime
 from datetime import timedelta
+from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -319,6 +321,267 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             {
                 "is_duplicate": False,
                 "record": None,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["get"], url_path="check-vehicle")
+    def check_vehicle(self, request):
+        """
+        Check vehicle insurance status:
+        Query params:
+        - vehicle_number: string
+        - exclude_id: int (optional, for edit mode)
+        Returns:
+        - exists: bool
+        - vehicle_number: string
+        - has_active_policy: bool
+        - active_record: dict | null
+        - has_expired_policy: bool
+        - latest_expired_record: dict | null
+        - history_count: int
+        - message: string
+        """
+        raw_number = request.query_params.get("vehicle_number", "")
+        if not raw_number:
+            return Response(
+                {
+                    "exists": False,
+                    "vehicle_number": "",
+                    "has_active_policy": False,
+                    "active_record": None,
+                    "has_expired_policy": False,
+                    "latest_expired_record": None,
+                    "history_count": 0,
+                    "message": "Vehicle number not provided.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        from vehicles.models import Vehicle
+
+        normalized = Vehicle.normalize_vehicle_number(raw_number)
+        vehicle = Vehicle.objects.filter(vehicle_number__iexact=normalized).first()
+        if not vehicle:
+            return Response(
+                {
+                    "exists": False,
+                    "vehicle_number": normalized,
+                    "has_active_policy": False,
+                    "active_record": None,
+                    "has_expired_policy": False,
+                    "latest_expired_record": None,
+                    "history_count": 0,
+                    "message": f"Vehicle '{normalized}' does not exist yet. A new vehicle and policy record will be created.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        today = timezone.localdate()
+        records_qs = (
+            InsuranceRecord.objects.select_related(
+                "customer", "vehicle", "insurance_company"
+            )
+            .prefetch_related("documents", "payments")
+            .filter(vehicle=vehicle)
+            .order_by("-policy_expiry_date", "-id")
+        )
+
+        exclude_id = request.query_params.get("exclude_id") or request.query_params.get("id")
+        if exclude_id:
+            try:
+                records_qs = records_qs.exclude(pk=int(exclude_id))
+            except (ValueError, TypeError):
+                pass
+
+        all_records = list(records_qs)
+        if not all_records:
+            return Response(
+                {
+                    "exists": True,
+                    "vehicle_number": vehicle.vehicle_number,
+                    "vehicle_id": vehicle.id,
+                    "vehicle_type": vehicle.vehicle_type,
+                    "customer_id": vehicle.customer_id,
+                    "customer_name": vehicle.customer.name if vehicle.customer else "",
+                    "customer_phone": vehicle.customer.phone if vehicle.customer else "",
+                    "has_active_policy": False,
+                    "active_record": None,
+                    "has_expired_policy": False,
+                    "latest_expired_record": None,
+                    "history_count": 0,
+                    "message": f"Vehicle '{vehicle.vehicle_number}' has no insurance records. A new record can be created.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Check for active records
+        # Sync any record with policy_expiry_date < today to is_active=False
+        active_record = None
+        expired_records = []
+        for r in all_records:
+            if r.policy_expiry_date < today and r.is_active:
+                r.is_active = False
+                r.save(update_fields=["is_active"])
+
+            if r.is_active and r.policy_expiry_date >= today:
+                if not active_record:
+                    active_record = r
+            else:
+                expired_records.append(r)
+
+        if active_record:
+            detail_data = InsuranceRecordDetailSerializer(active_record, context={"request": request}).data
+            return Response(
+                {
+                    "exists": True,
+                    "vehicle_number": vehicle.vehicle_number,
+                    "vehicle_id": vehicle.id,
+                    "vehicle_type": vehicle.vehicle_type,
+                    "customer_id": vehicle.customer_id,
+                    "customer_name": vehicle.customer.name if vehicle.customer else "",
+                    "customer_phone": vehicle.customer.phone if vehicle.customer else "",
+                    "has_active_policy": True,
+                    "active_record": detail_data,
+                    "has_expired_policy": len(expired_records) > 0,
+                    "latest_expired_record": (
+                        InsuranceRecordDetailSerializer(expired_records[0], context={"request": request}).data
+                        if expired_records
+                        else None
+                    ),
+                    "history_count": len(expired_records),
+                    "message": (
+                        f"Active policy already exists for vehicle '{vehicle.vehicle_number}' "
+                        f"(Policy #{active_record.policy_number}, Expiry: {active_record.policy_expiry_date}). "
+                        "Cannot create duplicate record. Please Renew or Update."
+                    ),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # No active policy, but previous expired policies exist
+        latest_expired = expired_records[0] if expired_records else None
+        latest_data = (
+            InsuranceRecordDetailSerializer(latest_expired, context={"request": request}).data
+            if latest_expired
+            else None
+        )
+        return Response(
+            {
+                "exists": True,
+                "vehicle_number": vehicle.vehicle_number,
+                "vehicle_id": vehicle.id,
+                "vehicle_type": vehicle.vehicle_type,
+                "customer_id": vehicle.customer_id,
+                "customer_name": vehicle.customer.name if vehicle.customer else "",
+                "customer_phone": vehicle.customer.phone if vehicle.customer else "",
+                "has_active_policy": False,
+                "active_record": None,
+                "has_expired_policy": True,
+                "latest_expired_record": latest_data,
+                "history_count": len(expired_records),
+                "message": (
+                    f"Previous insurance for vehicle '{vehicle.vehicle_number}' is expired. "
+                    "Creating a new insurance record is allowed, and old records will be kept as history."
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="renew")
+    @transaction.atomic
+    def renew(self, request, pk=None):
+        """
+        POST /api/insurance/records/<id>/renew/
+        Renew an existing insurance policy:
+        - Marks old record as is_active=False (keeps in history).
+        - Creates new insurance record with is_active=True.
+        - Preserves documents & payments on old record.
+        """
+        old_record = self.get_object()
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+
+        # 1. Archive old record
+        old_record.is_active = False
+        old_record.save(update_fields=["is_active", "updated_at"])
+
+        # Also ensure no other record for this vehicle is marked active
+        InsuranceRecord.objects.filter(vehicle=old_record.vehicle, is_active=True).update(is_active=False)
+
+        # 2. Prepare payload for new record
+        # Inherit customer & vehicle if not specified
+        if "customer_id" not in data and "customer" not in data:
+            data["customer_id"] = old_record.customer_id
+        if "vehicle_id" not in data and "vehicle" not in data and "vehicle_number" not in data:
+            data["vehicle_id"] = old_record.vehicle_id
+            data["vehicle_number"] = old_record.vehicle.vehicle_number
+        if "vehicle_type" not in data and old_record.vehicle:
+            data["vehicle_type"] = old_record.vehicle.vehicle_type
+        if "insurance_company_id" not in data and "insurance_company" not in data:
+            data["insurance_company_id"] = old_record.insurance_company_id
+
+        # Auto-suggest dates if not provided
+        today = timezone.localdate()
+        if "policy_start_date" not in data or not data["policy_start_date"]:
+            if old_record.policy_expiry_date and old_record.policy_expiry_date >= today:
+                data["policy_start_date"] = str(old_record.policy_expiry_date + timedelta(days=1))
+            else:
+                data["policy_start_date"] = str(today)
+
+        if "policy_expiry_date" not in data or not data["policy_expiry_date"]:
+            start = datetime.date.fromisoformat(str(data["policy_start_date"]))
+            try:
+                data["policy_expiry_date"] = str(start.replace(year=start.year + 1))
+            except ValueError:
+                data["policy_expiry_date"] = str(start + timedelta(days=365))
+
+        if "total_premium" not in data or not data["total_premium"]:
+            data["total_premium"] = str(old_record.total_premium)
+
+        data["is_renewal"] = True
+
+        serializer = InsuranceRecordCreateUpdateSerializer(
+            data=data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        new_record = serializer.save()
+
+        detail_serializer = InsuranceRecordDetailSerializer(
+            new_record, context={"request": request}
+        )
+        return Response(
+            {
+                "message": f"Policy renewed successfully. Previous policy #{old_record.policy_number} has been archived to history.",
+                "data": detail_serializer.data,
+                "previous_record_id": old_record.id,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["get"], url_path="vehicle-history")
+    def vehicle_history(self, request, pk=None):
+        """
+        GET /api/insurance/records/<id>/vehicle-history/
+        Returns all policies for the vehicle associated with this record.
+        """
+        record = self.get_object()
+        records = (
+            InsuranceRecord.objects.select_related(
+                "customer", "vehicle", "insurance_company"
+            )
+            .prefetch_related("documents", "payments")
+            .filter(vehicle=record.vehicle)
+            .order_by("-policy_expiry_date", "-id")
+        )
+        serializer = InsuranceRecordListSerializer(
+            records, many=True, context={"request": request}
+        )
+        return Response(
+            {
+                "vehicle_id": record.vehicle_id,
+                "vehicle_number": record.vehicle.vehicle_number,
+                "total_records": records.count(),
+                "records": serializer.data,
             },
             status=status.HTTP_200_OK,
         )

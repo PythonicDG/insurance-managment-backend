@@ -42,6 +42,7 @@ class InsuranceRecord(models.Model):
     policy_expiry_date = models.DateField(db_index=True)
     total_premium = models.DecimalField(max_digits=12, decimal_places=2)
     remarks = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -49,6 +50,13 @@ class InsuranceRecord(models.Model):
         ordering = ["-entry_date", "-created_at"]
         verbose_name = "Insurance Record"
         verbose_name_plural = "Insurance Records"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["vehicle"],
+                condition=models.Q(is_active=True),
+                name="unique_active_insurance_per_vehicle",
+            )
+        ]
 
     def clean(self):
         super().clean()
@@ -68,9 +76,31 @@ class InsuranceRecord(models.Model):
                     "policy_number": f"Policy number '{self.policy_number}' is already registered to {cust_info}{veh_info}. Policy numbers must be unique."
                 })
 
+        # Validate that only one active policy can exist per vehicle
+        if self.is_active and self.vehicle_id:
+            active_qs = InsuranceRecord.objects.filter(
+                vehicle_id=self.vehicle_id,
+                is_active=True,
+            )
+            if self.pk:
+                active_qs = active_qs.exclude(pk=self.pk)
+            if active_qs.exists():
+                existing_active = active_qs.first()
+                veh_num = self.vehicle.vehicle_number if getattr(self, "vehicle", None) else ""
+                raise ValidationError({
+                    "vehicle_number": (
+                        f"Active policy already exists for vehicle '{veh_num}' "
+                        f"(Policy #{existing_active.policy_number}, Expiry: {existing_active.policy_expiry_date}). "
+                        "Only one active policy is allowed per vehicle."
+                    )
+                })
+
     def save(self, *args, **kwargs):
         if self.policy_number:
             self.policy_number = self.policy_number.strip()
+        # If policy has already expired by date, automatically set is_active to False
+        if self.policy_expiry_date and self.policy_expiry_date < timezone.localdate():
+            self.is_active = False
         self.clean()
         super().save(*args, **kwargs)
 

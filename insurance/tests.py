@@ -526,3 +526,170 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertNotEqual(new_cust.id, existing_cust.id)
         self.assertEqual(new_cust.phone, existing_cust.phone)
         self.assertEqual(res.data["data"]["customer"]["id"], new_cust.id)
+
+    def test_create_record_fails_if_active_policy_exists_on_vehicle(self):
+        """Vehicle number + Active insurance exists: Don't create a new record."""
+        customer = Customer.objects.create(name="Ramesh Kumar", phone="9876543200")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12AB9999", vehicle_type="Car")
+        InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="ACT-POL-9999",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=10000,
+            is_active=True,
+        )
+
+        payload = {
+            "policy_number": "NEW-POL-9999",
+            "entry_date": str(self.today),
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "12000.00",
+            "insurance_company_id": self.company.id,
+            "customer_id": customer.id,
+            "vehicle_number": "MH12AB9999",
+            "vehicle_type": "Car",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("vehicle_number", res.data)
+        self.assertIn("Active policy already exists", str(res.data["vehicle_number"]))
+
+    def test_create_record_succeeds_if_previous_policy_is_expired(self):
+        """Vehicle number + Previous insurance is expired: Allow creating new record while keeping old as history."""
+        customer = Customer.objects.create(name="Sunil Gupta", phone="9876543201")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12CD8888", vehicle_type="Car")
+        old_record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="OLD-EXP-8888",
+            policy_start_date=self.past_date,
+            policy_expiry_date=self.past_date + datetime.timedelta(days=10),
+            total_premium=8000,
+            is_active=False,
+        )
+
+        payload = {
+            "policy_number": "NEW-ACT-8888",
+            "entry_date": str(self.today),
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "14000.00",
+            "insurance_company_id": self.company.id,
+            "customer_id": customer.id,
+            "vehicle_number": "MH12CD8888",
+            "vehicle_type": "Car",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        # Both records must exist in database
+        self.assertEqual(InsuranceRecord.objects.filter(vehicle=vehicle).count(), 2)
+        old_record.refresh_from_db()
+        self.assertFalse(old_record.is_active)
+
+        new_record = InsuranceRecord.objects.get(policy_number="NEW-ACT-8888")
+        self.assertTrue(new_record.is_active)
+
+    def test_database_constraint_one_active_policy_per_vehicle(self):
+        """Database constraint enforces only one active policy per vehicle."""
+        from django.db import IntegrityError
+        customer = Customer.objects.create(name="Anil Kapoor", phone="9876543202")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12EF7777", vehicle_type="Car")
+        InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="ACT-001-7777",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=5000,
+            is_active=True,
+        )
+
+        # Attempting to save a second active record directly should raise IntegrityError or ValidationError
+        with self.assertRaises((IntegrityError, Exception)):
+            rec2 = InsuranceRecord(
+                customer=customer,
+                vehicle=vehicle,
+                insurance_company=self.company,
+                policy_number="ACT-002-7777",
+                policy_start_date=self.today,
+                policy_expiry_date=self.next_year,
+                total_premium=6000,
+                is_active=True,
+            )
+            rec2.save()
+
+    def test_check_vehicle_endpoint(self):
+        """Test GET /api/insurance/records/check-vehicle/ for active, expired, and non-existent vehicles."""
+        customer = Customer.objects.create(name="Deepak Joshi", phone="9876543203")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12GH6666", vehicle_type="SUV")
+        record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="POL-CHK-6666",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=15000,
+            is_active=True,
+        )
+
+        # 1. Active vehicle check
+        res_active = self.client.get("/api/insurance/records/check-vehicle/?vehicle_number=MH12GH6666")
+        self.assertEqual(res_active.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_active.data["has_active_policy"])
+        self.assertEqual(res_active.data["active_record"]["id"], record.id)
+
+        # 2. Exclude by id (edit mode)
+        res_exclude = self.client.get(f"/api/insurance/records/check-vehicle/?vehicle_number=MH12GH6666&exclude_id={record.id}")
+        self.assertEqual(res_exclude.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_exclude.data["has_active_policy"])
+
+        # 3. Non-existent vehicle
+        res_none = self.client.get("/api/insurance/records/check-vehicle/?vehicle_number=MH99ZZ0000")
+        self.assertEqual(res_none.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_none.data["exists"])
+        self.assertFalse(res_none.data["has_active_policy"])
+
+    def test_renew_endpoint(self):
+        """Test POST /api/insurance/records/<id>/renew/ archives old policy and creates new active policy."""
+        customer = Customer.objects.create(name="Kavita Rao", phone="9876543204")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12IJ5555", vehicle_type="Car")
+        old_record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="OLD-POL-5555",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=9000,
+            is_active=True,
+        )
+
+        renew_payload = {
+            "policy_number": "RENEW-POL-5555",
+            "total_premium": "11000.00",
+            "remarks": "Renewed policy with bonus discount",
+        }
+        res = self.client.post(f"/api/insurance/records/{old_record.id}/renew/", renew_payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["previous_record_id"], old_record.id)
+
+        old_record.refresh_from_db()
+        self.assertFalse(old_record.is_active)
+
+        new_rec = InsuranceRecord.objects.get(policy_number="RENEW-POL-5555")
+        self.assertTrue(new_rec.is_active)
+        self.assertEqual(new_rec.vehicle_id, vehicle.id)
+        self.assertEqual(InsuranceRecord.objects.filter(vehicle=vehicle).count(), 2)
+
+        # Vehicle history endpoint check
+        hist_res = self.client.get(f"/api/insurance/records/{new_rec.id}/vehicle-history/")
+        self.assertEqual(hist_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(hist_res.data["total_records"], 2)

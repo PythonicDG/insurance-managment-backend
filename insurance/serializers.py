@@ -111,6 +111,7 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
             "customer",
             "vehicle",
             "insurance_company",
+            "is_active",
             "is_expired",
             "days_left",
             "status",
@@ -165,6 +166,7 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
             "payment_status",
             "paid_amount",
             "balance",
+            "is_active",
             "is_expired",
             "days_left",
             "status",
@@ -206,6 +208,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
     payment_mode = serializers.CharField(required=False, allow_blank=True, write_only=True)
     payment_date = serializers.DateField(required=False, write_only=True)
     payment_notes = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    is_renewal = serializers.BooleanField(required=False, default=False, write_only=True)
 
     class Meta:
         model = InsuranceRecord
@@ -217,6 +220,8 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "policy_expiry_date",
             "total_premium",
             "remarks",
+            "is_active",
+            "is_renewal",
             "insurance_company",
             "insurance_company_id",
             "customer",
@@ -240,7 +245,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "payment_date",
             "payment_notes",
         ]
-        read_only_fields = ["id", "customer", "vehicle"]
+        read_only_fields = ["id", "customer", "vehicle", "is_active"]
         extra_kwargs = {
             "policy_number": {"validators": []},
             "insurance_company": {"required": False},
@@ -554,6 +559,45 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         if "entry_date" not in validated_data or not validated_data.get("entry_date"):
             validated_data["entry_date"] = timezone.localdate()
 
+        # Check vehicle active insurance & renewal
+        is_renewal = (
+            validated_data.pop("is_renewal", False)
+            or self.initial_data.get("is_renewal", False)
+        )
+        if isinstance(is_renewal, str):
+            is_renewal = is_renewal.lower() in ("true", "1", "yes")
+
+        today = timezone.localdate()
+        # Any existing record whose policy_expiry_date < today is marked inactive
+        for old_rec in InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True):
+            if old_rec.policy_expiry_date < today:
+                old_rec.is_active = False
+                old_rec.save(update_fields=["is_active"])
+
+        active_rec = InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True).first()
+        if active_rec:
+            if not is_renewal:
+                raise serializers.ValidationError({
+                    "vehicle_number": (
+                        f"Active policy already exists for vehicle '{vehicle.vehicle_number}' "
+                        f"(Policy #{active_rec.policy_number}, Expiry: {active_rec.policy_expiry_date}). "
+                        "Only one active policy is allowed per vehicle. Please renew or update the existing policy."
+                    ),
+                    "active_record_id": active_rec.id,
+                    "active_policy_number": active_rec.policy_number,
+                })
+            else:
+                # Renewal: archive current active record to history
+                active_rec.is_active = False
+                active_rec.save(update_fields=["is_active"])
+
+        # Ensure all other older records for this vehicle are is_active=False
+        InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True).update(is_active=False)
+
+        # Set is_active for the new record
+        exp_date = validated_data.get("policy_expiry_date")
+        validated_data["is_active"] = not (exp_date and exp_date < today)
+
         validated_data["customer"] = customer
         validated_data["vehicle"] = vehicle
 
@@ -630,6 +674,19 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         current_customer = instance.customer
         new_vehicle = self._resolve_vehicle(current_customer, validated_data)
         if new_vehicle:
+            if new_vehicle.id != instance.vehicle_id:
+                today = timezone.localdate()
+                active_on_new = InsuranceRecord.objects.filter(
+                    vehicle=new_vehicle, is_active=True
+                ).exclude(pk=instance.pk).first()
+                if active_on_new and active_on_new.policy_expiry_date >= today:
+                    raise serializers.ValidationError({
+                        "vehicle_number": (
+                            f"Active policy already exists for vehicle '{new_vehicle.vehicle_number}' "
+                            f"(Policy #{active_on_new.policy_number}, Expiry: {active_on_new.policy_expiry_date}). "
+                            "Only one active policy is allowed per vehicle."
+                        )
+                    })
             instance.vehicle = new_vehicle
 
         # Handle other fields
