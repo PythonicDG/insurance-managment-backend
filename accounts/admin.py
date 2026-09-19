@@ -1,8 +1,10 @@
 from django.contrib import admin
-from django.db import models
-from . import models as app_models
+from .models import UserSessionActivity
 
 
-for model in app_models.__dict__.values():
-    if isinstance(model, type) and issubclass(model, models.Model):
-        admin.site.register(model)
+@admin.register(UserSessionActivity)
+class UserSessionActivityAdmin(admin.ModelAdmin):
+    list_display = ("user", "last_activity")
+    search_fields = ("user__username", "user__email")
+    readonly_fields = ("last_activity",)
+
