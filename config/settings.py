@@ -158,8 +158,8 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Session Inactivity / AFK Auto-Logout Timeout (in seconds, default 5 minutes = 300s)
-SESSION_INACTIVITY_TIMEOUT = int(os.getenv("SESSION_INACTIVITY_TIMEOUT", 300))
+# Inactivity Auto-Logout: Disabled (sessions remain active while browser tab is open)
+SESSION_INACTIVITY_TIMEOUT = None
 
 
 
