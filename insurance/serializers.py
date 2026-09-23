@@ -67,7 +67,7 @@ class InsuranceDocumentSerializer(serializers.ModelSerializer):
 class RecordCustomerSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
-        fields = ["id", "name", "phone", "email", "address"]
+        fields = ["id", "name", "phone", "alternative_mobile_number", "email", "address"]
 
 
 class RecordVehicleSummarySerializer(serializers.ModelSerializer):
@@ -107,6 +107,7 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "alternative_mobile_number",
             "remarks",
             "customer",
             "vehicle",
@@ -154,6 +155,7 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "alternative_mobile_number",
             "remarks",
             "customer",
             "vehicle",
@@ -188,6 +190,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
     # Customer inputs (Support either existing ID or automatic create/find details)
     customer_id = serializers.IntegerField(required=False, write_only=True)
     customer_phone = serializers.CharField(max_length=20, required=False, write_only=True)
+    customer_alternative_mobile_number = serializers.CharField(max_length=20, required=False, allow_blank=True, write_only=True)
     customer_name = serializers.CharField(max_length=255, required=False, allow_blank=True, write_only=True)
     customer_email = serializers.EmailField(required=False, allow_blank=True, write_only=True)
     customer_address = serializers.CharField(required=False, allow_blank=True, write_only=True)
@@ -197,6 +200,9 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
     vehicle_id = serializers.IntegerField(required=False, write_only=True)
     vehicle_number = serializers.CharField(max_length=50, required=False, write_only=True)
     vehicle_type = serializers.CharField(max_length=50, required=False, allow_blank=True, write_only=True)
+
+    # Policy inputs
+    alternative_mobile_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
     # Initial Payment inputs (optional on record creation)
     initial_payment = serializers.JSONField(required=False, write_only=True)
@@ -219,6 +225,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "alternative_mobile_number",
             "remarks",
             "is_active",
             "is_renewal",
@@ -227,6 +234,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "customer",
             "customer_id",
             "customer_phone",
+            "customer_alternative_mobile_number",
             "customer_name",
             "customer_email",
             "customer_address",
@@ -250,6 +258,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "policy_number": {"validators": []},
             "insurance_company": {"required": False},
             "entry_date": {"required": False},
+            "alternative_mobile_number": {"required": False, "allow_blank": True},
             "remarks": {"required": False, "allow_blank": True},
         }
 
@@ -380,6 +389,15 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             or self.initial_data.get("phone", "")
         )
 
+        customer_alt_phone = (
+            validated_data.pop("customer_alternative_mobile_number", "")
+            or self.initial_data.get("customer_alternative_mobile_number")
+            or validated_data.get("alternative_mobile_number")
+            or self.initial_data.get("alternative_mobile_number", "")
+        )
+        if customer_alt_phone:
+            customer_alt_phone = Customer.normalize_phone(customer_alt_phone)
+
         # If existing customer_id is specified: Update existing customer in place (no duplicate)
         if customer_id:
             try:
@@ -399,6 +417,9 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                     if norm_phone and customer.phone != norm_phone:
                         customer.phone = norm_phone
                         dirty = True
+                if customer_alt_phone and customer.alternative_mobile_number != customer_alt_phone:
+                    customer.alternative_mobile_number = customer_alt_phone
+                    dirty = True
                 if dirty:
                     customer.save()
                 return customer
@@ -418,6 +439,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                 return Customer.objects.create(
                     phone=normalized_phone,
                     name=customer_name or "",
+                    alternative_mobile_number=customer_alt_phone or "",
                     email=customer_email or "",
                     address=customer_address or "",
                 )
@@ -434,6 +456,9 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                     if customer_email and named_match.email != customer_email:
                         named_match.email = customer_email
                         dirty = True
+                    if customer_alt_phone and named_match.alternative_mobile_number != customer_alt_phone:
+                        named_match.alternative_mobile_number = customer_alt_phone
+                        dirty = True
                     if dirty:
                         named_match.save()
                     return named_match
@@ -441,12 +466,16 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             # If no name given and existing customer exists with this phone
             first_match = existing_qs.order_by("created_at").first()
             if first_match and not customer_name:
+                if customer_alt_phone and not first_match.alternative_mobile_number:
+                    first_match.alternative_mobile_number = customer_alt_phone
+                    first_match.save(update_fields=["alternative_mobile_number", "updated_at"])
                 return first_match
 
             # Otherwise create a new customer
             return Customer.objects.create(
                 phone=normalized_phone,
                 name=customer_name or "",
+                alternative_mobile_number=customer_alt_phone or "",
                 email=customer_email or "",
                 address=customer_address or "",
             )
@@ -598,6 +627,19 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         exp_date = validated_data.get("policy_expiry_date")
         validated_data["is_active"] = not (exp_date and exp_date < today)
 
+        # Ensure alternative_mobile_number is captured
+        alt_phone = (
+            validated_data.get("alternative_mobile_number")
+            or self.initial_data.get("alternative_mobile_number")
+            or getattr(customer, "alternative_mobile_number", "")
+            or ""
+        )
+        if alt_phone:
+            validated_data["alternative_mobile_number"] = Customer.normalize_phone(alt_phone)
+            if customer and not customer.alternative_mobile_number:
+                customer.alternative_mobile_number = validated_data["alternative_mobile_number"]
+                customer.save(update_fields=["alternative_mobile_number", "updated_at"])
+
         validated_data["customer"] = customer
         validated_data["vehicle"] = vehicle
 
@@ -688,6 +730,18 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                         )
                     })
             instance.vehicle = new_vehicle
+
+        # Handle alternative_mobile_number update
+        alt_phone = (
+            validated_data.get("alternative_mobile_number")
+            or self.initial_data.get("alternative_mobile_number")
+        )
+        if alt_phone is not None:
+            norm_alt = Customer.normalize_phone(alt_phone) if alt_phone else ""
+            validated_data["alternative_mobile_number"] = norm_alt
+            if instance.customer and not instance.customer.alternative_mobile_number and norm_alt:
+                instance.customer.alternative_mobile_number = norm_alt
+                instance.customer.save(update_fields=["alternative_mobile_number", "updated_at"])
 
         # Handle other fields
         return super().update(instance, validated_data)

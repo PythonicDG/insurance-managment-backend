@@ -44,6 +44,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             "customer_id",
             "name",
             "phone",
+            "alternative_mobile_number",
             "email",
             "address",
             "vehicles_count",
@@ -57,6 +58,11 @@ class CustomerSerializer(serializers.ModelSerializer):
         if not normalized:
             raise serializers.ValidationError("Phone number cannot be empty.")
         return normalized
+
+    def validate_alternative_mobile_number(self, value):
+        if not value:
+            return ""
+        return Customer.normalize_phone(value)
 
 
 class CustomerDetailSerializer(CustomerSerializer):

@@ -5,6 +5,9 @@ from django.db import models
 class Customer(models.Model):
     name = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=20, db_index=True)
+    alternative_mobile_number = models.CharField(
+        max_length=20, blank=True, default="", verbose_name="Alternative Mobile Number"
+    )
     email = models.EmailField(blank=True, default="")
     address = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -32,6 +35,8 @@ class Customer(models.Model):
     def save(self, *args, **kwargs):
         if self.phone:
             self.phone = self.normalize_phone(self.phone)
+        if self.alternative_mobile_number:
+            self.alternative_mobile_number = self.normalize_phone(self.alternative_mobile_number)
         super().save(*args, **kwargs)
 
     @classmethod

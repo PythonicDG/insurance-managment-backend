@@ -775,3 +775,29 @@ class InsuranceRecordAPITestCase(APITestCase):
         hist_res = self.client.get(f"/api/insurance/records/{new_rec.id}/vehicle-history/")
         self.assertEqual(hist_res.status_code, status.HTTP_200_OK)
         self.assertEqual(hist_res.data["total_records"], 2)
+
+    def test_alternative_mobile_number_handling(self):
+        """Test creating record with alternative_mobile_number, searching, and auto-syncing."""
+        payload = {
+            "policy_number": "POL-ALT-TEST-001",
+            "insurance_company_id": self.company.id,
+            "customer_name": "Rohan Sharma",
+            "customer_phone": "+91 98220 12345",
+            "alternative_mobile_number": "+91 (98220) 67890",
+            "vehicle_number": "MH12XY9999",
+            "vehicle_type": "Sedan",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": 15000,
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["data"]["alternative_mobile_number"], "+919822067890")
+        self.assertEqual(res.data["data"]["customer"]["alternative_mobile_number"], "+919822067890")
+
+        # Search by alternative mobile number
+        search_res = self.client.get("/api/insurance/records/?search=9822067890")
+        self.assertEqual(search_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(search_res.data["count"], 1)
+        self.assertEqual(search_res.data["results"][0]["policy_number"], "POL-ALT-TEST-001")
+        self.assertEqual(search_res.data["results"][0]["alternative_mobile_number"], "+919822067890")

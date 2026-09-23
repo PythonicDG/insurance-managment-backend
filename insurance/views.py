@@ -105,6 +105,8 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 Q(policy_number__icontains=search)
                 | Q(customer__name__icontains=search)
                 | Q(customer__phone__icontains=search)
+                | Q(customer__alternative_mobile_number__icontains=search)
+                | Q(alternative_mobile_number__icontains=search)
                 | Q(customer__email__icontains=search)
                 | Q(vehicle__vehicle_number__icontains=search)
                 | Q(vehicle__vehicle_type__icontains=search)
@@ -407,6 +409,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                     "customer_id": vehicle.customer_id,
                     "customer_name": vehicle.customer.name if vehicle.customer else "",
                     "customer_phone": vehicle.customer.phone if vehicle.customer else "",
+                    "customer_alternative_mobile_number": vehicle.customer.alternative_mobile_number if vehicle.customer else "",
                     "has_active_policy": False,
                     "active_record": None,
                     "has_expired_policy": False,
@@ -443,6 +446,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                     "customer_id": vehicle.customer_id,
                     "customer_name": vehicle.customer.name if vehicle.customer else "",
                     "customer_phone": vehicle.customer.phone if vehicle.customer else "",
+                    "customer_alternative_mobile_number": vehicle.customer.alternative_mobile_number if vehicle.customer else "",
                     "has_active_policy": True,
                     "active_record": detail_data,
                     "has_expired_policy": len(expired_records) > 0,
@@ -477,6 +481,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 "customer_id": vehicle.customer_id,
                 "customer_name": vehicle.customer.name if vehicle.customer else "",
                 "customer_phone": vehicle.customer.phone if vehicle.customer else "",
+                "customer_alternative_mobile_number": vehicle.customer.alternative_mobile_number if vehicle.customer else "",
                 "has_active_policy": False,
                 "active_record": None,
                 "has_expired_policy": True,
@@ -521,6 +526,8 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             data["vehicle_type"] = old_record.vehicle.vehicle_type
         if "insurance_company_id" not in data and "insurance_company" not in data:
             data["insurance_company_id"] = old_record.insurance_company_id
+        if "alternative_mobile_number" not in data and old_record.alternative_mobile_number:
+            data["alternative_mobile_number"] = old_record.alternative_mobile_number
 
         # Auto-suggest dates if not provided
         today = timezone.localdate()

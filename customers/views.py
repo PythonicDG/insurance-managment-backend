@@ -46,15 +46,23 @@ class CustomerViewSet(
                 if len(normalized_phone) >= 10:
                     last_10 = normalized_phone[-10:]
                     queryset = queryset.filter(
-                        Q(phone=normalized_phone) | Q(phone=last_10) | Q(phone__endswith=last_10)
+                        Q(phone=normalized_phone)
+                        | Q(phone=last_10)
+                        | Q(phone__endswith=last_10)
+                        | Q(alternative_mobile_number=normalized_phone)
+                        | Q(alternative_mobile_number=last_10)
+                        | Q(alternative_mobile_number__endswith=last_10)
                     )
                 else:
-                    queryset = queryset.filter(phone=normalized_phone)
+                    queryset = queryset.filter(
+                        Q(phone=normalized_phone) | Q(alternative_mobile_number=normalized_phone)
+                    )
 
         if search:
             queryset = queryset.filter(
                 Q(name__icontains=search)
                 | Q(phone__icontains=search)
+                | Q(alternative_mobile_number__icontains=search)
                 | Q(email__icontains=search)
             )
         return queryset.order_by("-created_at")
@@ -114,14 +122,19 @@ class CustomerViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Primary search on normalized phone
-        queryset = Customer.objects.filter(phone=normalized).prefetch_related("vehicles")
+        # Primary search on normalized phone / alternative mobile number
+        queryset = Customer.objects.filter(
+            Q(phone=normalized) | Q(alternative_mobile_number=normalized)
+        ).prefetch_related("vehicles")
 
         # Fallback to match by last 10 digits if standard 10+ digits provided
         if not queryset.exists() and len(normalized) >= 10:
             last_10 = normalized[-10:]
             queryset = Customer.objects.filter(
-                Q(phone=last_10) | Q(phone__endswith=last_10)
+                Q(phone=last_10)
+                | Q(phone__endswith=last_10)
+                | Q(alternative_mobile_number=last_10)
+                | Q(alternative_mobile_number__endswith=last_10)
             ).prefetch_related("vehicles")
 
         queryset = queryset.order_by("-created_at")

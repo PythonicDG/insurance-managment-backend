@@ -41,6 +41,13 @@ class InsuranceRecord(models.Model):
     policy_start_date = models.DateField()
     policy_expiry_date = models.DateField(db_index=True)
     total_premium = models.DecimalField(max_digits=12, decimal_places=2)
+    alternative_mobile_number = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        db_index=True,
+        verbose_name="Alternative Mobile Number",
+    )
     remarks = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -98,6 +105,9 @@ class InsuranceRecord(models.Model):
     def save(self, *args, **kwargs):
         if self.policy_number:
             self.policy_number = self.policy_number.strip()
+        if self.alternative_mobile_number:
+            from customers.models import Customer
+            self.alternative_mobile_number = Customer.normalize_phone(self.alternative_mobile_number)
         # If policy has already expired by date, automatically set is_active to False
         if self.policy_expiry_date and self.policy_expiry_date < timezone.localdate():
             self.is_active = False

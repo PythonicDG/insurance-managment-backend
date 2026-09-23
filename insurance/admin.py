@@ -29,6 +29,7 @@ class InsuranceRecordAdmin(admin.ModelAdmin):
     list_display = (
         "policy_number",
         "customer",
+        "alternative_mobile_number",
         "vehicle",
         "insurance_company",
         "total_premium",
@@ -48,8 +49,10 @@ class InsuranceRecordAdmin(admin.ModelAdmin):
     )
     search_fields = (
         "policy_number",
+        "alternative_mobile_number",
         "customer__name",
         "customer__phone",
+        "customer__alternative_mobile_number",
         "vehicle__vehicle_number",
         "insurance_company__name",
     )
