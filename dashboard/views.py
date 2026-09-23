@@ -1,5 +1,5 @@
 from calendar import monthrange
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from django.db.models import (
     Case,
@@ -284,6 +284,13 @@ class DashboardSummaryView(APIView):
 
         total_policies = InsuranceRecord.objects.count()
 
+        ten_days_later = today + timedelta(days=10)
+        expiring_today_count = InsuranceRecord.objects.filter(policy_expiry_date=today).count()
+        expiring_soon_count = InsuranceRecord.objects.filter(
+            policy_expiry_date__gte=today,
+            policy_expiry_date__lte=ten_days_later,
+        ).count()
+
         kpis = {
             "today_entries": entries_count,
             "today_premium": period_premium,
@@ -293,6 +300,8 @@ class DashboardSummaryView(APIView):
             "total_policies": total_policies,
             "total_premium": float(all_premium),
             "total_received": float(all_received),
+            "expiring_today_count": expiring_today_count,
+            "expiring_soon_count": expiring_soon_count,
             "filter_start_date": str(start_date) if start_date else None,
             "filter_end_date": str(end_date) if end_date else None,
             "is_all_time": is_all_time,
@@ -428,26 +437,17 @@ class DashboardSummaryView(APIView):
                 })
 
         # ---------------------------------------------------------------------
-        # 5. Recent Insurance Records (Latest records matching filter)
+        # 5. Expiring Today Records (Policies whose expiry date is today)
         # ---------------------------------------------------------------------
-        recent_base = (
-            InsuranceRecord.objects.select_related("customer", "vehicle", "insurance_company")
+        expiring_today_qs = (
+            InsuranceRecord.objects.filter(policy_expiry_date=today)
+            .select_related("customer", "vehicle", "insurance_company")
             .prefetch_related("payments")
+            .order_by("-created_at")
         )
-        if not is_all_time and start_date and end_date:
-            period_recent = list(
-                recent_base.filter(entry_date__gte=start_date, entry_date__lte=end_date)
-                .order_by("-entry_date", "-created_at", "-id")[:10]
-            )
-            if period_recent:
-                recent_qs = period_recent
-            else:
-                recent_qs = recent_base.order_by("-entry_date", "-created_at", "-id")[:10]
-        else:
-            recent_qs = recent_base.order_by("-entry_date", "-created_at", "-id")[:10]
 
-        recent_records = []
-        for rec in recent_qs:
+        expiring_today_records = []
+        for rec in expiring_today_qs:
             total_prem = float(rec.total_premium or Decimal("0.00"))
             paid_sum = sum([p.amount for p in rec.payments.all()], Decimal("0.00"))
             paid_float = float(paid_sum)
@@ -463,12 +463,18 @@ class DashboardSummaryView(APIView):
             formatted_date = (
                 rec.entry_date.strftime("%d %b %Y") if rec.entry_date else ""
             )
+            formatted_expiry_date = (
+                rec.policy_expiry_date.strftime("%d %b %Y") if rec.policy_expiry_date else ""
+            )
 
-            recent_records.append({
+            expiring_today_records.append({
                 "id": rec.id,
                 "policy_number": rec.policy_number,
                 "entry_date": str(rec.entry_date),
                 "formatted_date": formatted_date,
+                "policy_expiry_date": str(rec.policy_expiry_date),
+                "formatted_expiry_date": formatted_expiry_date,
+                "days_left": rec.days_left,
                 "customer_name": rec.customer.name if rec.customer else "Unknown",
                 "customer_phone": rec.customer.phone if rec.customer else "",
                 "vehicle_number": rec.vehicle.vehicle_number if rec.vehicle else "N/A",
@@ -478,6 +484,7 @@ class DashboardSummaryView(APIView):
                 "paid_amount": paid_float,
                 "outstanding": out_float,
                 "status": rec_status,
+                "policy_status": rec.status,
             })
 
         return Response(
@@ -486,7 +493,8 @@ class DashboardSummaryView(APIView):
                 "business_summary": business_summary,
                 "payment_status_summary": payment_status_summary,
                 "company_wise_summary": company_wise_summary,
-                "recent_records": recent_records,
+                "expiring_today_records": expiring_today_records,
+                "recent_records": expiring_today_records,  # Backwards compatibility alias
             },
             status=status.HTTP_200_OK,
         )

@@ -127,7 +127,7 @@ class InsuranceRecord(models.Model):
         days = self.days_left
         if days < 0:
             return "expired"
-        elif days <= 30:
+        elif days <= 10:
             return "expiring_soon"
         return "active"
 

@@ -172,7 +172,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         if policy_expiry_to:
             queryset = queryset.filter(policy_expiry_date__lte=policy_expiry_to)
 
-        # 5. Status Filter (active / expired / expiring_soon)
+        # 5. Status Filter (active / expired / expiring_soon / expiring_today)
         record_status = params.get("status", "").strip().lower()
         today = timezone.localdate()
         if record_status == "active":
@@ -180,11 +180,13 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         elif record_status == "expired":
             queryset = queryset.filter(policy_expiry_date__lt=today)
         elif record_status in ["expiring_soon", "expiring"]:
-            thirty_days_later = today + timedelta(days=30)
+            ten_days_later = today + timedelta(days=10)
             queryset = queryset.filter(
                 policy_expiry_date__gte=today,
-                policy_expiry_date__lte=thirty_days_later,
+                policy_expiry_date__lte=ten_days_later,
             )
+        elif record_status in ["expiring_today", "today"]:
+            queryset = queryset.filter(policy_expiry_date=today)
 
         # 6. Payment Status Filter (UNPAID, PARTIAL, PAID)
         payment_status_filter = params.get("payment_status", "").strip().upper()

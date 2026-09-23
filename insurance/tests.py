@@ -316,6 +316,88 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertEqual(res_expired.data["count"], 1)
         self.assertEqual(res_expired.data["results"][0]["policy_number"], "EXP-001")
 
+    def test_record_filters_expiring_soon_and_expiring_today(self):
+        """Test filtering by expiring_soon (next 10 days) and expiring_today."""
+        customer = Customer.objects.create(name="Exp Test Customer", phone="9988776655")
+
+        v_today = Vehicle.objects.create(customer=customer, vehicle_number="EX-TODAY")
+        v_5d = Vehicle.objects.create(customer=customer, vehicle_number="EX-5D")
+        v_10d = Vehicle.objects.create(customer=customer, vehicle_number="EX-10D")
+        v_11d = Vehicle.objects.create(customer=customer, vehicle_number="EX-11D")
+        v_exp = Vehicle.objects.create(customer=customer, vehicle_number="EX-PAST")
+
+        rec_today = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=v_today,
+            insurance_company=self.company,
+            policy_number="POL-EXP-TODAY",
+            policy_start_date=self.today - datetime.timedelta(days=365),
+            policy_expiry_date=self.today,
+            total_premium=5000,
+        )
+        rec_5d = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=v_5d,
+            insurance_company=self.company,
+            policy_number="POL-EXP-5D",
+            policy_start_date=self.today - datetime.timedelta(days=360),
+            policy_expiry_date=self.today + datetime.timedelta(days=5),
+            total_premium=5000,
+        )
+        rec_10d = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=v_10d,
+            insurance_company=self.company,
+            policy_number="POL-EXP-10D",
+            policy_start_date=self.today - datetime.timedelta(days=355),
+            policy_expiry_date=self.today + datetime.timedelta(days=10),
+            total_premium=5000,
+        )
+        rec_11d = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=v_11d,
+            insurance_company=self.company,
+            policy_number="POL-EXP-11D",
+            policy_start_date=self.today - datetime.timedelta(days=354),
+            policy_expiry_date=self.today + datetime.timedelta(days=11),
+            total_premium=5000,
+        )
+        rec_past = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=v_exp,
+            insurance_company=self.company,
+            policy_number="POL-EXP-PAST",
+            policy_start_date=self.today - datetime.timedelta(days=366),
+            policy_expiry_date=self.today - datetime.timedelta(days=1),
+            total_premium=5000,
+        )
+
+        # Verify model status property
+        self.assertEqual(rec_today.status, "expiring_soon")
+        self.assertEqual(rec_5d.status, "expiring_soon")
+        self.assertEqual(rec_10d.status, "expiring_soon")
+        self.assertEqual(rec_11d.status, "active")
+        self.assertEqual(rec_past.status, "expired")
+
+        # Test API: expiring_soon (next 10 days)
+        res_soon = self.client.get("/api/insurance/records/?status=expiring_soon")
+        self.assertEqual(res_soon.status_code, status.HTTP_200_OK)
+        soon_policies = [r["policy_number"] for r in res_soon.data["results"]]
+        self.assertIn("POL-EXP-TODAY", soon_policies)
+        self.assertIn("POL-EXP-5D", soon_policies)
+        self.assertIn("POL-EXP-10D", soon_policies)
+        self.assertNotIn("POL-EXP-11D", soon_policies)
+        self.assertNotIn("POL-EXP-PAST", soon_policies)
+
+        # Test API: expiring_today
+        res_today = self.client.get("/api/insurance/records/?status=expiring_today")
+        self.assertEqual(res_today.status_code, status.HTTP_200_OK)
+        today_policies = [r["policy_number"] for r in res_today.data["results"]]
+        self.assertIn("POL-EXP-TODAY", today_policies)
+        self.assertNotIn("POL-EXP-5D", today_policies)
+        self.assertNotIn("POL-EXP-10D", today_policies)
+        self.assertNotIn("POL-EXP-11D", today_policies)
+
     def test_record_details(self):
         """Test retrieving insurance record details."""
         customer = Customer.objects.create(name="Rohit Verma", phone="9777777777")
