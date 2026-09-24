@@ -137,6 +137,14 @@ class LedgerPagination(PageNumberPagination):
     page_size_query_param = "page_size"
     max_page_size = 100
 
+    def paginate_queryset(self, queryset, request, view=None):
+        paginate_param = request.query_params.get("paginate", "").lower()
+        page_size_param = request.query_params.get("page_size", "").lower()
+        if paginate_param in ["false", "0", "no"] or page_size_param in ["all", "none"]:
+            return None
+        return super().paginate_queryset(queryset, request, view=view)
+
+
 
 class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """

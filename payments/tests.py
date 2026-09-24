@@ -775,3 +775,13 @@ class LedgerApiTestCase(APITestCase):
         self.assertEqual(len(res.data["payments"]), 1)
         self.assertEqual(float(res.data["payments"][0]["amount"]), 18500.0)
 
+    def test_ledger_unpaginated_for_export_and_pdf(self):
+        """Verify GET /api/payments/ledger/?paginate=false returns unpaginated records."""
+        res = self.client.get("/api/payments/ledger/?paginate=false")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("results", res.data)
+        self.assertIn("summary", res.data)
+        # Should contain both pending records without page/page_size pagination wrapper
+        self.assertEqual(len(res.data["results"]), 2)
+
+
