@@ -85,6 +85,19 @@ class PaymentViewSet(viewsets.ModelViewSet):
         serializer.save(insurance_record=record)
         record.refresh_from_db()
 
+        # Auto WhatsApp Payment Receipt Trigger
+        try:
+            from whatsapp_integration.models import WhatsAppConfig
+            from whatsapp_integration.services import WhatsAppClient
+
+            wa_cfg = WhatsAppConfig.get_config()
+            if wa_cfg.is_enabled and wa_cfg.auto_send_payment_receipt:
+                payment_inst = serializer.instance
+                if payment_inst:
+                    WhatsAppClient.send_payment_received_notification(payment_inst, async_send=True)
+        except Exception:
+            pass
+
         return Response(
             {
                 "message": "Payment recorded successfully.",

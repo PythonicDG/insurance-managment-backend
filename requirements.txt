@@ -9,3 +9,4 @@ gunicorn==23.0.0
 asgiref==3.12.1
 PyJWT==2.14.0
 sqlparse==0.6.0
+requests>=2.31.0

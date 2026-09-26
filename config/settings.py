@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "payments",
     "dashboard",
     "settings_app",
+    "whatsapp_integration",
 ]
 
 MIDDLEWARE = [

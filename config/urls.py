@@ -12,6 +12,7 @@ urlpatterns = [
     path("api/payments/", include("payments.urls")),
     path("api/dashboard/", include("dashboard.urls")),
     path("api/settings/", include("settings_app.urls")),
+    path("api/whatsapp/", include("whatsapp_integration.urls")),
 ]
 
 if settings.DEBUG:

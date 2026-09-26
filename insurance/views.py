@@ -245,6 +245,18 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         record = serializer.save()
+
+        # Auto WhatsApp Notification Trigger
+        try:
+            from whatsapp_integration.models import WhatsAppConfig
+            from whatsapp_integration.services import WhatsAppClient
+
+            wa_cfg = WhatsAppConfig.get_config()
+            if wa_cfg.is_enabled and wa_cfg.auto_send_policy_creation:
+                WhatsAppClient.send_policy_issued_notification(record, async_send=True)
+        except Exception:
+            pass
+
         detail_serializer = InsuranceRecordDetailSerializer(
             record, context={"request": request}
         )
@@ -255,6 +267,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_201_CREATED,
         )
+
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
@@ -555,6 +568,17 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         new_record = serializer.save()
 
+        # Auto WhatsApp Notification Trigger on Renewal
+        try:
+            from whatsapp_integration.models import WhatsAppConfig
+            from whatsapp_integration.services import WhatsAppClient
+
+            wa_cfg = WhatsAppConfig.get_config()
+            if wa_cfg.is_enabled and wa_cfg.auto_send_policy_creation:
+                WhatsAppClient.send_policy_issued_notification(new_record, async_send=True)
+        except Exception:
+            pass
+
         detail_serializer = InsuranceRecordDetailSerializer(
             new_record, context={"request": request}
         )
@@ -695,6 +719,19 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save(insurance_record=record)
         record.refresh_from_db()
+
+        # Auto WhatsApp Payment Receipt Trigger
+        try:
+            from whatsapp_integration.models import WhatsAppConfig
+            from whatsapp_integration.services import WhatsAppClient
+
+            wa_cfg = WhatsAppConfig.get_config()
+            if wa_cfg.is_enabled and wa_cfg.auto_send_payment_receipt:
+                payment_inst = serializer.instance
+                if payment_inst:
+                    WhatsAppClient.send_payment_received_notification(payment_inst, async_send=True)
+        except Exception:
+            pass
 
         return Response(
             {
