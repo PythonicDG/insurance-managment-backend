@@ -586,3 +586,123 @@ Best regards,
         )
         return success, f"Security confirmation email dispatched to {recipient_email}."
 
+
+def send_pin_removed_alert_email(
+    business_name: str,
+    recipient_email: str,
+    removed_by: str = "Administrator",
+    async_dispatch: bool = True,
+) -> tuple[bool, str]:
+    """
+    Sends a security notification email alerting that the Export Security PIN
+    has been removed / disabled.
+    """
+    import html
+    from django.utils import timezone
+
+    subject = f"Security Notice: Export Security PIN Removed - {business_name}"
+
+    formatted_time = timezone.localtime(timezone.now()).strftime("%d %b %Y, %I:%M %p %Z")
+
+    plain_text = f"""Security Alert: Export Security PIN Removed
+
+The Export Security PIN for {business_name} has been removed/disabled.
+Bulk data exports (CSV, PDF, Print) will no longer require a PIN authorization.
+
+Removed by: {removed_by}
+Timestamp: {formatted_time}
+
+If you did not authorize this action, please access your Settings immediately and configure a new Security PIN.
+
+Best regards,
+{business_name} Security Team
+"""
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>PIN Removed</title></head>
+<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1e293b;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #f8fafc; padding: 32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" style="max-width: 520px; background-color: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+          <tr>
+            <td style="background: linear-gradient(135deg, #e11d48 0%, #f43f5e 100%); padding: 20px 24px; text-align: left;">
+              <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #ffe4e6; margin-bottom: 4px;">
+                SECURITY STATUS ALERT
+              </div>
+              <div style="font-size: 18px; font-weight: 700; color: #ffffff;">
+                {html.escape(business_name)}
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 24px;">
+              <h2 style="font-size: 16px; font-weight: 600; color: #0f172a; margin: 0 0 10px 0;">
+                Export Security PIN Disabled / Removed
+              </h2>
+              <p style="font-size: 13px; color: #475569; margin: 0 0 16px 0; line-height: 1.5;">
+                The Security PIN required for downloading CSV records and saving/printing PDFs has been removed. Data exports will no longer require a PIN unless reconfigured.
+              </p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 10px; padding: 12px; font-size: 13px; margin-bottom: 16px;">
+                <tr>
+                  <td style="padding: 4px 8px; color: #9f1239; font-weight: 500;">Action:</td>
+                  <td style="padding: 4px 8px; color: #881337; font-weight: 600;">Security PIN Removed</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 8px; color: #9f1239; font-weight: 500;">Removed By:</td>
+                  <td style="padding: 4px 8px; color: #881337; font-weight: 600;">{html.escape(removed_by)}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 8px; color: #9f1239; font-weight: 500;">Timestamp:</td>
+                  <td style="padding: 4px 8px; color: #881337; font-weight: 600;">{html.escape(formatted_time)}</td>
+                </tr>
+              </table>
+              <div style="font-size: 12px; color: #64748b; line-height: 1.4;">
+                If you did not authorize this change, please log in to your account and re-configure your Security PIN in <strong>Account &amp; Security</strong> settings.
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color: #f8fafc; border-top: 1px solid #e2e8f0; padding: 14px 24px; text-align: center; font-size: 11px; color: #94a3b8;">
+              Automated security message for {html.escape(business_name)}.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
+
+    from_email = getattr(settings, "DEFAULT_FROM_EMAIL", "") or recipient_email
+
+    import sys
+    is_testing = (
+        getattr(settings, "TESTING", False)
+        or "test" in sys.argv
+        or getattr(settings, "EMAIL_BACKEND", "").endswith("locmem.EmailBackend")
+    )
+    if is_testing:
+        async_dispatch = False
+
+    if async_dispatch:
+        thread = threading.Thread(
+            target=_dispatch_email,
+            args=(subject, plain_text, html_content, from_email, recipient_email),
+            daemon=True,
+        )
+        thread.start()
+        return True, f"Security removal confirmation email queued for {recipient_email}."
+    else:
+        success = _dispatch_email(
+            subject=subject,
+            plain_text=plain_text,
+            html_content=html_content,
+            from_email=from_email,
+            to_email=recipient_email,
+        )
+        return success, f"Security removal confirmation email dispatched to {recipient_email}."
+
+

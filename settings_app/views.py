@@ -363,3 +363,72 @@ class SetExportPinView(APIView):
         )
 
 
+class RemoveExportPinView(APIView):
+    """
+    Validates the 6-digit OTP and removes/disables the Export Security PIN.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.utils import timezone
+        from .email_service import send_pin_removed_alert_email
+
+        otp = str(request.data.get("otp", "")).strip()
+        settings_obj, _ = BusinessSettings.objects.get_or_create(id=1)
+
+        if not settings_obj.export_pin:
+            return Response(
+                {"success": False, "message": "No Export Security PIN is currently configured."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not settings_obj.pin_otp:
+            return Response(
+                {
+                    "success": False,
+                    "message": "No verification code was requested or code has already been used. Please request a new code.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if settings_obj.pin_otp_expires_at and timezone.now() > settings_obj.pin_otp_expires_at:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Verification code has expired (10-minute limit). Please request a new code.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if otp != settings_obj.pin_otp:
+            return Response(
+                {"success": False, "message": "Invalid verification code. Please check your email."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Remove the PIN and clear OTP
+        settings_obj.export_pin = ""
+        settings_obj.pin_otp = ""
+        settings_obj.pin_otp_expires_at = None
+        settings_obj.save(update_fields=["export_pin", "pin_otp", "pin_otp_expires_at", "updated_at"])
+
+        # Send confirmation alert email
+        if settings_obj.email:
+            removed_by = request.user.get_full_name() or request.user.username
+            send_pin_removed_alert_email(
+                business_name=settings_obj.business_name,
+                recipient_email=settings_obj.email,
+                removed_by=removed_by,
+                async_dispatch=True,
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Export Security PIN removed successfully. Bulk exports will no longer require a PIN.",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+

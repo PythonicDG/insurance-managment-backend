@@ -7,6 +7,7 @@ from .views import (
     VerifyExportPinView,
     RequestPinOtpView,
     SetExportPinView,
+    RemoveExportPinView,
 )
 
 urlpatterns = [
@@ -17,6 +18,7 @@ urlpatterns = [
     path("verify-export-pin/", VerifyExportPinView.as_view(), name="verify-export-pin"),
     path("pin/request-otp/", RequestPinOtpView.as_view(), name="pin-request-otp"),
     path("pin/set/", SetExportPinView.as_view(), name="pin-set"),
+    path("pin/remove/", RemoveExportPinView.as_view(), name="pin-remove"),
 ]
 
 

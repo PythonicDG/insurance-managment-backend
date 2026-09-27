@@ -238,3 +238,41 @@ class ExportNotificationEmailTests(TestCase):
         serializer_configured = BusinessSettingsSerializer(self.business_settings)
         self.assertTrue(serializer_configured.data["is_export_pin_set"])
 
+    def test_remove_export_pin_success_and_failures(self):
+        from django.utils import timezone
+        from datetime import timedelta
+
+        self.client.force_authenticate(user=self.user)
+        remove_url = reverse("pin-remove")
+
+        # 1. Failure when PIN not set
+        res_no_pin = self.client.post(remove_url, {"otp": "123456"})
+        self.assertEqual(res_no_pin.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Configure PIN & OTP
+        self.business_settings.set_export_pin("9876")
+        self.business_settings.pin_otp = "654321"
+        self.business_settings.pin_otp_expires_at = timezone.now() + timedelta(minutes=10)
+        self.business_settings.save()
+
+        # 2. Failure with invalid OTP
+        res_bad_otp = self.client.post(remove_url, {"otp": "000000"})
+        self.assertEqual(res_bad_otp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 3. Successful removal with correct OTP
+        mail.outbox = []
+        res_success = self.client.post(remove_url, {"otp": "654321"})
+        self.assertEqual(res_success.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_success.data["success"])
+
+        self.business_settings.refresh_from_db()
+        self.assertEqual(self.business_settings.export_pin, "")
+        self.assertFalse(self.business_settings.is_export_pin_set)
+        self.assertEqual(self.business_settings.pin_otp, "")
+        self.assertIsNone(self.business_settings.pin_otp_expires_at)
+
+        # Verify removal alert email
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("PIN Removed", mail.outbox[0].subject)
+
+
