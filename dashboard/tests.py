@@ -38,6 +38,9 @@ class DashboardSummaryApiTests(APITestCase):
         self.vehicle2 = Vehicle.objects.create(
             customer=self.customer, vehicle_number="DL-08-CD-5678", vehicle_type="Bike"
         )
+        self.vehicle3 = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="KA-01-EF-9999", vehicle_type="Truck"
+        )
 
         today = timezone.localdate()
 
@@ -80,7 +83,7 @@ class DashboardSummaryApiTests(APITestCase):
         # Record 3: Completely outstanding (no payments)
         self.rec3 = InsuranceRecord.objects.create(
             customer=self.customer,
-            vehicle=self.vehicle1,
+            vehicle=self.vehicle3,
             insurance_company=self.company1,
             policy_number="POL-1003",
             entry_date=today,
@@ -229,4 +232,103 @@ class DashboardSummaryApiTests(APITestCase):
         self.assertEqual(len(custom_summary), 6)
         expected_keys = ["2024-01", "2024-02", "2024-03", "2024-04", "2024-05", "2024-06"]
         self.assertEqual([item["month_key"] for item in custom_summary], expected_keys)
+
+
+class DashboardNotificationsApiTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="notif_user",
+            email="notif@test.com",
+            password="testpassword123",
+        )
+        self.token = Token.objects.create(user=self.user)
+        self.url = reverse("dashboard-notifications")
+
+        self.company = InsuranceCompany.objects.create(name="Tata AIG", is_active=True)
+        self.customer = Customer.objects.create(
+            name="Amit Verma", phone="9898989898", email="amit@test.com"
+        )
+        self.veh_today = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH-02-XY-1000", vehicle_type="Car"
+        )
+        self.veh_yesterday = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH-02-XY-2000", vehicle_type="Bike"
+        )
+        self.veh_future = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH-02-XY-3000", vehicle_type="Car"
+        )
+
+        today = timezone.localdate()
+        yesterday = today - timezone.timedelta(days=1)
+        tomorrow = today + timezone.timedelta(days=1)
+
+        # Policy expiring strictly today
+        self.rec_today = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.veh_today,
+            insurance_company=self.company,
+            policy_number="POL-TODAY-001",
+            entry_date=today - timezone.timedelta(days=365),
+            policy_start_date=today - timezone.timedelta(days=365),
+            policy_expiry_date=today,
+            total_premium=Decimal("10000.00"),
+        )
+        Payment.objects.create(
+            insurance_record=self.rec_today,
+            amount=Decimal("3000.00"),
+            payment_date=today,
+            payment_method="Cash",
+        )
+
+        # Policy that expired yesterday (MUST NOT appear in today's notifications)
+        self.rec_yesterday = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.veh_yesterday,
+            insurance_company=self.company,
+            policy_number="POL-YEST-002",
+            entry_date=yesterday - timezone.timedelta(days=365),
+            policy_start_date=yesterday - timezone.timedelta(days=365),
+            policy_expiry_date=yesterday,
+            total_premium=Decimal("8000.00"),
+        )
+
+        # Policy expiring tomorrow (MUST NOT appear in today's notifications)
+        self.rec_tomorrow = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.veh_future,
+            insurance_company=self.company,
+            policy_number="POL-TOM-003",
+            entry_date=tomorrow - timezone.timedelta(days=365),
+            policy_start_date=tomorrow - timezone.timedelta(days=365),
+            policy_expiry_date=tomorrow,
+            total_premium=Decimal("12000.00"),
+        )
+
+    def test_notifications_unauthenticated_returns_401(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_notifications_strictly_returns_today_not_yesterday_not_tomorrow(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        data = resp.data
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(len(data["records"]), 1)
+
+        rec = data["records"][0]
+        self.assertEqual(rec["policy_number"], "POL-TODAY-001")
+        self.assertEqual(rec["customer_name"], "Amit Verma")
+        self.assertEqual(rec["vehicle_number"], "MH-02-XY-1000")
+        self.assertEqual(rec["total_premium"], 10000.0)
+        self.assertEqual(rec["paid_amount"], 3000.0)
+        self.assertEqual(rec["outstanding"], 7000.0)
+        self.assertEqual(rec["payment_status"], "Partial")
+
+        # Verify yesterday's and tomorrow's policies are strictly excluded
+        policy_numbers = [r["policy_number"] for r in data["records"]]
+        self.assertNotIn("POL-YEST-002", policy_numbers)
+        self.assertNotIn("POL-TOM-003", policy_numbers)
+
 

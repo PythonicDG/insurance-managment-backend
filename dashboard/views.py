@@ -537,3 +537,68 @@ class DashboardBusinessSummaryView(APIView):
         )
         return Response({"business_summary": summary}, status=status.HTTP_200_OK)
 
+
+class DashboardNotificationsView(APIView):
+    """
+    Dedicated lightweight notification endpoint for the bell icon in the app header.
+    STRICTLY returns policies that expire or have expired TODAY (policy_expiry_date == today).
+    Does NOT return yesterday's or older expired records.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        today = timezone.localdate()
+
+        # Query strictly policies expiring today (policy_expiry_date == today)
+        records_qs = (
+            InsuranceRecord.objects.filter(policy_expiry_date=today)
+            .select_related("customer", "vehicle", "insurance_company")
+            .prefetch_related("payments")
+            .order_by("-created_at")
+        )
+
+        records_data = []
+        for rec in records_qs:
+            total_prem = float(rec.total_premium or Decimal("0.00"))
+            paid_sum = sum([p.amount for p in rec.payments.all()], Decimal("0.00"))
+            paid_float = float(paid_sum)
+            out_float = max(0.0, total_prem - paid_float)
+
+            if paid_float >= total_prem and total_prem > 0:
+                rec_status = "Paid"
+            elif paid_float > 0:
+                rec_status = "Partial"
+            else:
+                rec_status = "Outstanding"
+
+            records_data.append({
+                "id": rec.id,
+                "policy_number": rec.policy_number,
+                "entry_date": str(rec.entry_date) if rec.entry_date else "",
+                "policy_start_date": str(rec.policy_start_date) if rec.policy_start_date else "",
+                "policy_expiry_date": str(rec.policy_expiry_date),
+                "formatted_expiry_date": rec.policy_expiry_date.strftime("%d %b %Y"),
+                "days_left": rec.days_left,
+                "customer_name": rec.customer.name if rec.customer else "Unknown",
+                "customer_phone": rec.customer.phone if rec.customer else "",
+                "vehicle_number": rec.vehicle.vehicle_number if rec.vehicle else "N/A",
+                "vehicle_type": rec.vehicle.vehicle_type if rec.vehicle else "Vehicle",
+                "insurance_company": rec.insurance_company.name if rec.insurance_company else "N/A",
+                "total_premium": total_prem,
+                "paid_amount": paid_float,
+                "outstanding": out_float,
+                "payment_status": rec_status,
+                "status": "expired" if rec.is_expired else "expiring_today",
+            })
+
+        return Response(
+            {
+                "today": str(today),
+                "count": len(records_data),
+                "records": records_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
