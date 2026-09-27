@@ -165,14 +165,31 @@ SESSION_INACTIVITY_TIMEOUT = None
 
 
 # CORS configuration
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 if cors_origins_env:
-    CORS_ALLOWED_ORIGINS = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+    origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+    for d_origin in DEFAULT_CORS_ORIGINS:
+        if d_origin not in origins:
+            origins.append(d_origin)
+    CORS_ALLOWED_ORIGINS = origins
     CORS_ALLOW_ALL_ORIGINS = False
 else:
-    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
+    CORS_ALLOW_ALL_ORIGINS = False
 
 CORS_ALLOW_CREDENTIALS = True
+
+# Cookie security settings for HttpOnly authentication
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "Lax")
+AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN", None) or None
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
 
 
 # CSRF configuration (required when running behind reverse proxy or accessing HTTPS admin)
