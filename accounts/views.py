@@ -78,10 +78,16 @@ class LoginView(APIView):
         )
 
         remember_me = bool(request.data.get("remember_me", False))
-        include_token = (
-            bool(request.data.get("include_token", False)) or 
-            request.query_params.get("include_token", "").lower() in ("true", "1")
-        )
+        raw_include = request.data.get("include_token", None)
+        if isinstance(raw_include, str):
+            include_token = raw_include.strip().lower() in ("true", "1")
+        elif raw_include is not None:
+            include_token = bool(raw_include)
+        else:
+            include_token = (
+                request.query_params.get("include_token", "").strip().lower() in ("true", "1") or
+                request.headers.get("X-Include-Token", "").strip().lower() in ("true", "1")
+            )
 
         resp_data = {
             "message": "Login successful.",
