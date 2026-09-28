@@ -801,3 +801,109 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertEqual(search_res.data["count"], 1)
         self.assertEqual(search_res.data["results"][0]["policy_number"], "POL-ALT-TEST-001")
         self.assertEqual(search_res.data["results"][0]["alternative_mobile_number"], "+919822067890")
+
+    def test_create_record_with_discount_full_payment(self):
+        """Test that discount in Rs is accepted on full payment and correctly settles the policy."""
+        payload = {
+            "policy_number": "POL-DISC-001",
+            "insurance_company_id": self.company.id,
+            "customer_name": "Discount User",
+            "customer_phone": "9998887771",
+            "vehicle_number": "MH12DISC01",
+            "vehicle_type": "Car",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "10000.00",
+            "discount": "500.00",
+            "paid_amount": "9500.00",
+            "payment_method": "UPI",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec = InsuranceRecord.objects.get(policy_number="POL-DISC-001")
+        self.assertEqual(float(rec.discount), 500.0)
+        self.assertEqual(float(rec.net_premium), 9500.0)
+        self.assertEqual(float(rec.total_paid), 9500.0)
+        self.assertEqual(float(rec.outstanding), 0.0)
+        self.assertEqual(rec.payment_status, "PAID")
+
+    def test_create_record_discount_partial_payment_succeeds(self):
+        """Test that discount in Rs is accepted on partial payment and correctly reflects outstanding."""
+        payload = {
+            "policy_number": "POL-DISC-PART-01",
+            "insurance_company_id": self.company.id,
+            "customer_name": "Partial User",
+            "customer_phone": "9998887772",
+            "vehicle_number": "MH12DISC02",
+            "vehicle_type": "Car",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "10000.00",
+            "discount": "500.00",
+            "paid_amount": "5000.00",  # Partial payment!
+            "payment_method": "Cash",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec = InsuranceRecord.objects.get(policy_number="POL-DISC-PART-01")
+        self.assertEqual(float(rec.discount), 500.0)
+        self.assertEqual(float(rec.net_premium), 9500.0)
+        self.assertEqual(float(rec.total_paid), 5000.0)
+        self.assertEqual(float(rec.outstanding), 4500.0)
+        self.assertEqual(rec.payment_status, "PARTIAL")
+
+    def test_create_record_discount_exceeds_premium_fails(self):
+        """Test that discount exceeding total premium is rejected."""
+        payload = {
+            "policy_number": "POL-DISC-FAIL-02",
+            "insurance_company_id": self.company.id,
+            "customer_name": "Excess User",
+            "customer_phone": "9998887773",
+            "vehicle_number": "MH12DISC03",
+            "vehicle_type": "Car",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "5000.00",
+            "discount": "6000.00",
+            "paid_amount": "0.00",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("discount", res.data)
+
+    def test_record_payment_with_discount_settles_balance(self):
+        """Test applying a discount when settling an outstanding record in full via payment API."""
+        # Create an unpaid record first
+        payload = {
+            "policy_number": "POL-DISC-SETTLE-01",
+            "insurance_company_id": self.company.id,
+            "customer_name": "Settle User",
+            "customer_phone": "9998887774",
+            "vehicle_number": "MH12DISC04",
+            "vehicle_type": "Car",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "8000.00",
+        }
+        res = self.client.post("/api/insurance/records/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec_id = res.data["data"]["id"]
+
+        # Collect full payment with ₹300 discount
+        pay_res = self.client.post(
+            "/api/payments/",
+            {
+                "insurance_record_id": rec_id,
+                "amount": "7700.00",
+                "discount": "300.00",
+                "payment_method": "Online",
+            },
+            format="json",
+        )
+        self.assertEqual(pay_res.status_code, status.HTTP_201_CREATED)
+        rec = InsuranceRecord.objects.get(pk=rec_id)
+        self.assertEqual(float(rec.discount), 300.0)
+        self.assertEqual(float(rec.net_premium), 7700.0)
+        self.assertEqual(float(rec.total_paid), 7700.0)
+        self.assertEqual(float(rec.outstanding), 0.0)
+        self.assertEqual(rec.payment_status, "PAID")

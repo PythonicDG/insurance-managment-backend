@@ -94,6 +94,8 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
     transactions = PaymentSerializer(source="payments", many=True, read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     outstanding = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_premium = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     payment_status = serializers.CharField(read_only=True)
     paid_amount = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
     balance = serializers.DecimalField(source="outstanding", max_digits=12, decimal_places=2, read_only=True)
@@ -107,6 +109,8 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "discount",
+            "net_premium",
             "alternative_mobile_number",
             "remarks",
             "customer",
@@ -142,6 +146,8 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
     status = serializers.CharField(read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     outstanding = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_premium = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     payment_status = serializers.CharField(read_only=True)
     paid_amount = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
     balance = serializers.DecimalField(source="outstanding", max_digits=12, decimal_places=2, read_only=True)
@@ -155,6 +161,8 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "discount",
+            "net_premium",
             "alternative_mobile_number",
             "remarks",
             "customer",
@@ -203,6 +211,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
 
     # Policy inputs
     alternative_mobile_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    discount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal("0.00"))
 
     # Initial Payment inputs (optional on record creation)
     initial_payment = serializers.JSONField(required=False, write_only=True)
@@ -225,6 +234,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "discount",
             "alternative_mobile_number",
             "remarks",
             "is_active",
@@ -315,6 +325,56 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"total_premium": "Total premium cannot be negative."}
             )
+
+        # Discount validation
+        discount = attrs.get("discount")
+        if discount is None and self.instance:
+            discount = self.instance.discount
+        if discount is None:
+            discount = Decimal("0.00")
+
+        if discount < Decimal("0.00"):
+            raise serializers.ValidationError({"discount": "Discount cannot be negative."})
+
+        effective_premium = (
+            premium
+            if premium is not None
+            else (self.instance.total_premium if self.instance else Decimal("0.00"))
+        )
+        if discount > effective_premium:
+            raise serializers.ValidationError({
+                "discount": f"Discount (₹{discount}) cannot exceed total premium (₹{effective_premium})."
+            })
+
+        # Ensure initial / paid amount (if provided) does not exceed net payable
+        raw_init_pay = (
+            attrs.get("initial_payment")
+            or attrs.get("paid_amount")
+            or self.initial_data.get("initial_payment")
+            or self.initial_data.get("paid_amount")
+        )
+        init_val = None
+        if isinstance(raw_init_pay, dict):
+            init_val = Decimal(str(raw_init_pay.get("amount") or 0))
+        elif raw_init_pay is not None and str(raw_init_pay).strip() != "":
+            try:
+                init_val = Decimal(str(raw_init_pay).strip())
+            except Exception:
+                init_val = None
+
+        net_payable = max(Decimal("0.00"), effective_premium - discount)
+        if init_val is not None and init_val > Decimal("0.00"):
+            if not self.instance:
+                if init_val > net_payable:
+                    raise serializers.ValidationError({
+                        "paid_amount": f"Paid amount (₹{init_val:.2f}) cannot exceed net payable premium (₹{net_payable:.2f})."
+                    })
+            else:
+                current_paid = self.instance.total_paid
+                if (current_paid + init_val) > net_payable:
+                    raise serializers.ValidationError({
+                        "paid_amount": f"Total paid amount (₹{(current_paid + init_val):.2f}) cannot exceed net payable premium (₹{net_payable:.2f})."
+                    })
 
         # On creation: Validate customer and vehicle specification
         if not self.instance:
@@ -667,6 +727,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                     Payment.objects.create(
                         insurance_record=record,
                         amount=dec_amount,
+                        discount=record.discount or Decimal("0.00"),
                         payment_method=str(pay_method).strip() or "Cash",
                         payment_date=pay_date or record.policy_start_date or record.entry_date or timezone.localdate(),
                         notes=str(pay_notes).strip(),

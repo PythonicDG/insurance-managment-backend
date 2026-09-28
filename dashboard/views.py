@@ -133,28 +133,14 @@ def calculate_business_summary(
     range_start = month_slots[0]["start"]
     range_end = month_slots[-1]["end"]
 
-    # Aggregate payments in range by month
-    payments_in_range = (
-        Payment.objects.filter(payment_date__gte=range_start, payment_date__lte=range_end)
-        .values("payment_date")
-        .annotate(total_amount=Sum("amount"))
-    )
-
-    payments_by_month_key = {}
-    for p in payments_in_range:
-        p_date = p["payment_date"]
-        key = f"{p_date.year}-{p_date.month:02d}"
-        payments_by_month_key[key] = (
-            payments_by_month_key.get(key, Decimal("0.00")) + (p["total_amount"] or Decimal("0.00"))
-        )
-
-    # Aggregate records in range with their paid sum
+    # Aggregate records in range by entry date with their paid sum
+    # All payments for a policy map back to the month of the policy's entry_date
     records_in_range = (
         InsuranceRecord.objects.filter(entry_date__gte=range_start, entry_date__lte=range_end)
         .annotate(
             paid_total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
         )
-        .values("entry_date", "total_premium", "paid_total")
+        .values("entry_date", "total_premium", "discount", "paid_total")
     )
 
     records_by_month_key = {}
@@ -164,24 +150,32 @@ def calculate_business_summary(
         if key not in records_by_month_key:
             records_by_month_key[key] = {
                 "premium": Decimal("0.00"),
+                "discount": Decimal("0.00"),
+                "collected": Decimal("0.00"),
                 "outstanding": Decimal("0.00"),
             }
         prem = r["total_premium"] or Decimal("0.00")
+        disc = r.get("discount") or Decimal("0.00")
         paid = r["paid_total"] or Decimal("0.00")
-        out = max(Decimal("0.00"), prem - paid)
+        out = max(Decimal("0.00"), prem - disc - paid)
         records_by_month_key[key]["premium"] += prem
+        records_by_month_key[key]["discount"] += disc
+        records_by_month_key[key]["collected"] += paid
         records_by_month_key[key]["outstanding"] += out
 
     business_summary = []
     for slot in month_slots:
         k = slot["month_key"]
-        collected = float(payments_by_month_key.get(k, Decimal("0.00")))
-        outstanding = float(records_by_month_key.get(k, {}).get("outstanding", Decimal("0.00")))
+        month_data = records_by_month_key.get(k, {})
+        collected = float(month_data.get("collected", Decimal("0.00")))
+        disc_val = float(month_data.get("discount", Decimal("0.00")))
+        outstanding = float(month_data.get("outstanding", Decimal("0.00")))
         business_summary.append({
             "month": slot["month_name"],
             "year": slot["year"],
             "month_key": k,
             "premium_collected": collected,
+            "discount": disc_val,
             "outstanding": outstanding,
         })
 
@@ -247,17 +241,21 @@ class DashboardSummaryView(APIView):
         )
         all_premium = all_premium_aggr["total"] or Decimal("0.00")
 
+        all_discount_aggr = InsuranceRecord.objects.aggregate(
+            total=Coalesce(Sum("discount"), Decimal("0.00"), output_field=DecimalField())
+        )
+        all_discount = all_discount_aggr["total"] or Decimal("0.00")
+
         all_received_aggr = Payment.objects.aggregate(
             total=Coalesce(Sum("amount"), Decimal("0.00"), output_field=DecimalField())
         )
         all_received = all_received_aggr["total"] or Decimal("0.00")
 
-        all_outstanding_dec = max(Decimal("0.00"), all_premium - all_received)
+        all_outstanding_dec = max(Decimal("0.00"), all_premium - all_discount - all_received)
         all_outstanding = float(all_outstanding_dec)
 
         if not is_all_time and start_date and end_date:
             period_records = InsuranceRecord.objects.filter(entry_date__gte=start_date, entry_date__lte=end_date)
-            period_payments = Payment.objects.filter(payment_date__gte=start_date, payment_date__lte=end_date)
 
             entries_count = period_records.count()
             period_premium_aggr = period_records.aggregate(
@@ -265,20 +263,30 @@ class DashboardSummaryView(APIView):
             )
             period_premium = float(period_premium_aggr["total"] or Decimal("0.00"))
 
-            period_received_aggr = period_payments.aggregate(
-                total=Coalesce(Sum("amount"), Decimal("0.00"), output_field=DecimalField())
+            period_discount_aggr = period_records.aggregate(
+                total=Coalesce(Sum("discount"), Decimal("0.00"), output_field=DecimalField())
+            )
+            period_discount = float(period_discount_aggr["total"] or Decimal("0.00"))
+
+            # Received payments anchored to records entered in this period (regardless of when paid)
+            period_received_aggr = period_records.aggregate(
+                total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
             )
             period_received = float(period_received_aggr["total"] or Decimal("0.00"))
 
-            # Outstanding for the records created in this period
-            period_records_paid_aggr = period_records.aggregate(
-                total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
+            # Outstanding for the records created in this period: Total Premium - Discount - Received
+            period_outstanding = float(
+                max(
+                    Decimal("0.00"),
+                    (period_premium_aggr["total"] or Decimal("0.00"))
+                    - (period_discount_aggr["total"] or Decimal("0.00"))
+                    - (period_received_aggr["total"] or Decimal("0.00")),
+                )
             )
-            period_records_paid = period_records_paid_aggr["total"] or Decimal("0.00")
-            period_outstanding = float(max(Decimal("0.00"), (period_premium_aggr["total"] or Decimal("0.00")) - period_records_paid))
         else:
             entries_count = InsuranceRecord.objects.count()
             period_premium = float(all_premium)
+            period_discount = float(all_discount)
             period_received = float(all_received)
             period_outstanding = all_outstanding
 
@@ -294,11 +302,14 @@ class DashboardSummaryView(APIView):
         kpis = {
             "today_entries": entries_count,
             "today_premium": period_premium,
+            "today_discount": period_discount,
             "today_received": period_received,
             "total_outstanding": period_outstanding,
             "all_time_outstanding": all_outstanding,
             "total_policies": total_policies,
             "total_premium": float(all_premium),
+            "total_discount": float(all_discount),
+            "all_time_discount": float(all_discount),
             "total_received": float(all_received),
             "expiring_today_count": expiring_today_count,
             "expiring_soon_count": expiring_soon_count,
@@ -321,24 +332,29 @@ class DashboardSummaryView(APIView):
             base_status_records = InsuranceRecord.objects.all()
 
         records_with_payments = base_status_records.annotate(
-            paid_sum=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
+            paid_sum=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField()),
+            net_prem_annot=Case(
+                When(total_premium__gt=F("discount"), then=F("total_premium") - F("discount")),
+                default=Decimal("0.00"),
+                output_field=DecimalField(),
+            )
         )
 
         status_aggr = records_with_payments.aggregate(
-            paid_count=Count(Case(When(paid_sum__gte=F("total_premium"), total_premium__gt=0, then=1))),
+            paid_count=Count(Case(When(paid_sum__gte=F("net_prem_annot"), total_premium__gt=0, then=1))),
             partial_count=Count(
-                Case(When(Q(paid_sum__gt=0) & Q(paid_sum__lt=F("total_premium")), then=1))
+                Case(When(Q(paid_sum__gt=0) & Q(paid_sum__lt=F("net_prem_annot")), then=1))
             ),
             outstanding_count=Count(
-                Case(When(Q(paid_sum__lte=0) | Q(total_premium__lte=0, paid_sum__lte=0), then=1))
+                Case(When(Q(paid_sum__lte=0) | Q(net_prem_annot__lte=0, paid_sum__lte=0), then=1))
             ),
             paid_amount=Coalesce(
-                Sum(Case(When(paid_sum__gte=F("total_premium"), then=F("total_premium")), default=Decimal("0.00"))),
+                Sum(Case(When(paid_sum__gte=F("net_prem_annot"), then=F("paid_sum")), default=Decimal("0.00"))),
                 Decimal("0.00"),
                 output_field=DecimalField(),
             ),
             partial_amount=Coalesce(
-                Sum(Case(When(Q(paid_sum__gt=0) & Q(paid_sum__lt=F("total_premium")), then=F("paid_sum")), default=Decimal("0.00"))),
+                Sum(Case(When(Q(paid_sum__gt=0) & Q(paid_sum__lt=F("net_prem_annot")), then=F("paid_sum")), default=Decimal("0.00"))),
                 Decimal("0.00"),
                 output_field=DecimalField(),
             ),
@@ -386,6 +402,11 @@ class DashboardSummaryView(APIView):
                         Decimal("0.00"),
                         output_field=DecimalField(),
                     ),
+                    total_discount_sum=Coalesce(
+                        Sum("insurance_records__discount", filter=rec_filter),
+                        Decimal("0.00"),
+                        output_field=DecimalField(),
+                    ),
                     collected_sum=Coalesce(
                         Sum("insurance_records__payments__amount", filter=rec_filter),
                         Decimal("0.00"),
@@ -405,6 +426,11 @@ class DashboardSummaryView(APIView):
                         Decimal("0.00"),
                         output_field=DecimalField(),
                     ),
+                    total_discount_sum=Coalesce(
+                        Sum("insurance_records__discount"),
+                        Decimal("0.00"),
+                        output_field=DecimalField(),
+                    ),
                     collected_sum=Coalesce(
                         Sum("insurance_records__payments__amount"),
                         Decimal("0.00"),
@@ -418,8 +444,9 @@ class DashboardSummaryView(APIView):
         company_wise_summary = []
         for c in companies:
             c_prem = float(c.total_premium_sum or Decimal("0.00"))
+            c_disc = float(getattr(c, "total_discount_sum", 0) or Decimal("0.00"))
             c_coll = float(c.collected_sum or Decimal("0.00"))
-            c_out = max(0.0, c_prem - c_coll)
+            c_out = max(0.0, c_prem - c_disc - c_coll)
             c_share = min(100.0, round((c_prem / context_premium * 100), 1)) if context_premium > 0 else 0.0
             collection_rate = round((c_coll / c_prem * 100), 1) if c_prem > 0 else 0.0
 
@@ -430,6 +457,7 @@ class DashboardSummaryView(APIView):
                     "company_name": c.name,
                     "policy_count": c.policy_count,
                     "total_premium": c_prem,
+                    "discount": c_disc,
                     "premium_collected": c_coll,
                     "outstanding": c_out,
                     "share_percentage": c_share,
@@ -446,14 +474,15 @@ class DashboardSummaryView(APIView):
             .order_by("-created_at")
         )
 
-        expiring_today_records = []
-        for rec in expiring_today_qs:
+        def format_record_item(rec):
             total_prem = float(rec.total_premium or Decimal("0.00"))
+            discount = float(rec.discount or Decimal("0.00"))
+            net_prem = max(0.0, total_prem - discount)
             paid_sum = sum([p.amount for p in rec.payments.all()], Decimal("0.00"))
             paid_float = float(paid_sum)
-            out_float = max(0.0, total_prem - paid_float)
+            out_float = max(0.0, net_prem - paid_float)
 
-            if paid_float >= total_prem and total_prem > 0:
+            if paid_float >= net_prem and net_prem > 0:
                 rec_status = "Paid"
             elif paid_float > 0:
                 rec_status = "Partial"
@@ -467,7 +496,7 @@ class DashboardSummaryView(APIView):
                 rec.policy_expiry_date.strftime("%d %b %Y") if rec.policy_expiry_date else ""
             )
 
-            expiring_today_records.append({
+            return {
                 "id": rec.id,
                 "policy_number": rec.policy_number,
                 "entry_date": str(rec.entry_date),
@@ -481,11 +510,22 @@ class DashboardSummaryView(APIView):
                 "vehicle_type": rec.vehicle.vehicle_type if rec.vehicle else "Vehicle",
                 "insurance_company": rec.insurance_company.name if rec.insurance_company else "N/A",
                 "total_premium": total_prem,
+                "discount": discount,
+                "net_premium": net_prem,
                 "paid_amount": paid_float,
                 "outstanding": out_float,
                 "status": rec_status,
                 "policy_status": rec.status,
-            })
+            }
+
+        expiring_today_records = [format_record_item(rec) for rec in expiring_today_qs]
+
+        recent_qs = (
+            InsuranceRecord.objects.select_related("customer", "vehicle", "insurance_company")
+            .prefetch_related("payments")
+            .order_by("-entry_date", "-created_at", "-id")[:10]
+        )
+        recent_records = [format_record_item(rec) for rec in recent_qs]
 
         return Response(
             {
@@ -494,7 +534,7 @@ class DashboardSummaryView(APIView):
                 "payment_status_summary": payment_status_summary,
                 "company_wise_summary": company_wise_summary,
                 "expiring_today_records": expiring_today_records,
-                "recent_records": expiring_today_records,  # Backwards compatibility alias
+                "recent_records": recent_records,
             },
             status=status.HTTP_200_OK,
         )
@@ -561,11 +601,13 @@ class DashboardNotificationsView(APIView):
         records_data = []
         for rec in records_qs:
             total_prem = float(rec.total_premium or Decimal("0.00"))
+            discount = float(rec.discount or Decimal("0.00"))
+            net_prem = max(0.0, total_prem - discount)
             paid_sum = sum([p.amount for p in rec.payments.all()], Decimal("0.00"))
             paid_float = float(paid_sum)
-            out_float = max(0.0, total_prem - paid_float)
+            out_float = max(0.0, net_prem - paid_float)
 
-            if paid_float >= total_prem and total_prem > 0:
+            if paid_float >= net_prem and net_prem > 0:
                 rec_status = "Paid"
             elif paid_float > 0:
                 rec_status = "Partial"
@@ -586,6 +628,8 @@ class DashboardNotificationsView(APIView):
                 "vehicle_type": rec.vehicle.vehicle_type if rec.vehicle else "Vehicle",
                 "insurance_company": rec.insurance_company.name if rec.insurance_company else "N/A",
                 "total_premium": total_prem,
+                "discount": discount,
+                "net_premium": net_prem,
                 "paid_amount": paid_float,
                 "outstanding": out_float,
                 "payment_status": rec_status,

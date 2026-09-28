@@ -80,9 +80,39 @@ class PaymentViewSet(viewsets.ModelViewSet):
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
         data["insurance_record_id"] = record.id
 
+        # Handle discount when recording payment
+        raw_discount = request.data.get("discount")
+        discount_amount = Decimal("0.00")
+        if raw_discount is not None and str(raw_discount).strip() != "":
+            try:
+                discount_amount = Decimal(str(raw_discount).strip())
+                if discount_amount < Decimal("0.00"):
+                    raise ValidationError({"discount": "Discount cannot be negative."})
+            except (ValueError, TypeError):
+                discount_amount = Decimal("0.00")
+
+        data["discount"] = discount_amount
+
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(insurance_record=record)
+        pay_amount = serializer.validated_data.get("amount", Decimal("0.00"))
+
+        total_prem = record.total_premium or Decimal("0.00")
+        current_paid = record.total_paid
+        current_discount = record.discount or Decimal("0.00")
+        remaining_balance = max(Decimal("0.00"), total_prem - current_discount - current_paid)
+
+        if (pay_amount + discount_amount) > remaining_balance:
+            raise ValidationError({
+                "amount": f"Total payment (₹{pay_amount:.2f}) plus discount (₹{discount_amount:.2f}) cannot exceed remaining balance (₹{remaining_balance:.2f})."
+            })
+
+        payment_instance = serializer.save(insurance_record=record, discount=discount_amount)
+
+        if discount_amount > Decimal("0.00"):
+            record.discount = current_discount + discount_amount
+            record.save(update_fields=["discount", "updated_at"])
+
         record.refresh_from_db()
 
         # Auto WhatsApp Payment Receipt Trigger
@@ -92,9 +122,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
             wa_cfg = WhatsAppConfig.get_config()
             if wa_cfg.is_enabled and wa_cfg.auto_send_payment_receipt:
-                payment_inst = serializer.instance
-                if payment_inst:
-                    WhatsAppClient.send_payment_received_notification(payment_inst, async_send=True)
+                if payment_instance:
+                    WhatsAppClient.send_payment_received_notification(payment_instance, async_send=True)
         except Exception:
             pass
 
@@ -103,12 +132,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 "message": "Payment recorded successfully.",
                 "data": serializer.data,
                 "total_paid": f"{record.total_paid:.2f}",
+                "discount": f"{record.discount:.2f}",
                 "outstanding": f"{record.outstanding:.2f}",
                 "payment_status": record.payment_status,
                 "status": record.payment_status,
             },
             status=status.HTTP_201_CREATED,
         )
+
+    def perform_destroy(self, instance):
+        record = instance.insurance_record
+        p_disc = instance.discount or Decimal("0.00")
+        super().perform_destroy(instance)
+        if p_disc > Decimal("0.00") and record:
+            record.discount = max(Decimal("0.00"), (record.discount or Decimal("0.00")) - p_disc)
+            record.save(update_fields=["discount", "updated_at"])
 
     @action(detail=False, methods=["get"], url_path="history")
     def history(self, request):
@@ -134,6 +172,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             {
                 "insurance_record_id": record.id,
                 "total_premium": f"{record.total_premium:.2f}",
+                "discount": f"{record.discount:.2f}",
+                "net_premium": f"{record.net_premium:.2f}",
                 "total_paid": f"{record.total_paid:.2f}",
                 "outstanding": f"{record.outstanding:.2f}",
                 "status": record.payment_status,
@@ -186,10 +226,10 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
                 annotated_outstanding=Coalesce(
                     Case(
                         When(
-                            annotated_paid__gte=F("total_premium"),
+                            annotated_paid__gte=F("total_premium") - F("discount"),
                             then=Value(Decimal("0.00")),
                         ),
-                        default=F("total_premium") - F("annotated_paid"),
+                        default=F("total_premium") - F("discount") - F("annotated_paid"),
                         output_field=DecimalField(max_digits=12, decimal_places=2),
                     ),
                     Decimal("0.00"),
@@ -199,7 +239,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             .annotate(
                 annotated_status=Case(
                     When(annotated_paid__lte=Decimal("0.00"), then=Value("Outstanding")),
-                    When(annotated_paid__gte=F("total_premium"), then=Value("Paid")),
+                    When(annotated_paid__gte=F("total_premium") - F("discount"), then=Value("Paid")),
                     default=Value("Partial"),
                     output_field=CharField(),
                 )
@@ -247,9 +287,9 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             elif payment_status in ["outstanding", "unpaid"]:
                 queryset = queryset.filter(annotated_paid__lte=0)
             elif payment_status == "partial":
-                queryset = queryset.filter(annotated_paid__gt=0, annotated_paid__lt=F("total_premium"))
+                queryset = queryset.filter(annotated_paid__gt=0, annotated_paid__lt=F("total_premium") - F("discount"))
             elif payment_status == "paid":
-                queryset = queryset.filter(annotated_paid__gte=F("total_premium"))
+                queryset = queryset.filter(annotated_paid__gte=F("total_premium") - F("discount"))
             elif payment_status in ["all", "all statuses"]:
                 pass
 
@@ -258,6 +298,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
     def compute_summary(self, queryset):
         aggr = queryset.aggregate(
             total_premium=Coalesce(Sum("total_premium"), Decimal("0.00"), output_field=DecimalField()),
+            total_discount=Coalesce(Sum("discount"), Decimal("0.00"), output_field=DecimalField()),
             total_received=Coalesce(Sum("annotated_paid"), Decimal("0.00"), output_field=DecimalField()),
             total_outstanding=Coalesce(Sum("annotated_outstanding"), Decimal("0.00"), output_field=DecimalField()),
             total_customers_pending=Count(
@@ -268,6 +309,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return {
             "total_premium": float(aggr["total_premium"]),
+            "total_discount": float(aggr["total_discount"]),
             "total_received": float(aggr["total_received"]),
             "total_outstanding": float(aggr["total_outstanding"]),
             "total_customers_pending": aggr["total_customers_pending"],

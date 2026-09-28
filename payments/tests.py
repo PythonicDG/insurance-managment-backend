@@ -440,10 +440,15 @@ class PaymentTransactionHistoryTestCase(APITestCase):
         self.assertEqual(r1.outstanding, Decimal("0.00"))
         self.assertEqual(r1.payment_status, "PAID")
 
-        # Record 2 for the same customer
+        # Record 2 for the same customer (different vehicle)
+        vehicle2 = Vehicle.objects.create(
+            customer=self.customer,
+            vehicle_number="MH01AB9998",
+            vehicle_type="Sedan",
+        )
         r2 = InsuranceRecord.objects.create(
             customer=self.customer,
-            vehicle=self.vehicle,
+            vehicle=vehicle2,
             insurance_company=self.company,
             policy_number="POL-MULTI-002",
             policy_start_date=self.today,
@@ -545,9 +550,14 @@ class PaymentTransactionHistoryTestCase(APITestCase):
         )
 
         # Partial
+        vehicle_partial = Vehicle.objects.create(
+            customer=self.customer,
+            vehicle_number="MH01AB9997",
+            vehicle_type="SUV",
+        )
         r_partial = InsuranceRecord.objects.create(
             customer=self.customer,
-            vehicle=self.vehicle,
+            vehicle=vehicle_partial,
             insurance_company=self.company,
             policy_number="POL-FILTER-PARTIAL",
             policy_start_date=self.today,
@@ -562,9 +572,14 @@ class PaymentTransactionHistoryTestCase(APITestCase):
         )
 
         # Paid
+        vehicle_paid = Vehicle.objects.create(
+            customer=self.customer,
+            vehicle_number="MH01AB9996",
+            vehicle_type="SUV",
+        )
         r_paid = InsuranceRecord.objects.create(
             customer=self.customer,
-            vehicle=self.vehicle,
+            vehicle=vehicle_paid,
             insurance_company=self.company,
             policy_number="POL-FILTER-PAID",
             policy_start_date=self.today,
@@ -783,5 +798,104 @@ class LedgerApiTestCase(APITestCase):
         self.assertIn("summary", res.data)
         # Should contain both pending records without page/page_size pagination wrapper
         self.assertEqual(len(res.data["results"]), 2)
+
+
+class PaymentDiscountAndEquationTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="discount_tester", password="password123", email="disc@example.com"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.company = InsuranceCompany.objects.create(name="Bajaj Allianz")
+        self.today = timezone.localdate()
+        self.next_year = self.today + datetime.timedelta(days=365)
+        self.customer = Customer.objects.create(name="Rohit Sharma", phone="9112233445")
+        self.vehicle = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH04AA1111", vehicle_type="Car"
+        )
+        self.record = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle,
+            insurance_company=self.company,
+            policy_number="POL-DISC-TEST",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("10000.00"),
+            discount=Decimal("0.00"),
+        )
+
+    def test_payment_with_discount_updates_record_and_equation_holds(self):
+        """
+        Total Premium = Received Payment + Discount + Outstanding.
+        Discount must NOT be included in received payment.
+        """
+        res = self.client.post(
+            "/api/payments/",
+            {
+                "insurance_record_id": self.record.id,
+                "amount": "4000.00",
+                "discount": "1000.00",
+                "payment_method": "UPI",
+                "notes": "Partial with discount",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.record.refresh_from_db()
+
+        self.assertEqual(self.record.total_paid, Decimal("4000.00"))  # Received payment only!
+        self.assertEqual(self.record.discount, Decimal("1000.00"))   # Discount recorded separately
+        self.assertEqual(self.record.outstanding, Decimal("5000.00")) # 10000 - 4000 - 1000
+        self.assertEqual(self.record.payment_status, "PARTIAL")
+
+        # Prove equation: Total Premium == Received + Discount + Outstanding
+        self.assertEqual(
+            self.record.total_premium,
+            self.record.total_paid + self.record.discount + self.record.outstanding
+        )
+
+    def test_payment_exceeding_remaining_balance_is_rejected(self):
+        """
+        If remaining balance is 10,000, attempting payment with amount=9000 + discount=2000 (total 11000)
+        must fail with 400 Bad Request.
+        """
+        res = self.client.post(
+            "/api/payments/",
+            {
+                "insurance_record_id": self.record.id,
+                "amount": "9000.00",
+                "discount": "2000.00",
+                "payment_method": "UPI",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cannot exceed remaining balance", str(res.data))
+
+    def test_delete_payment_with_discount_reverts_record_discount(self):
+        """
+        Deleting a payment that had a discount must decrement record.discount accordingly.
+        """
+        # Create payment with discount
+        p = Payment.objects.create(
+            insurance_record=self.record,
+            amount=Decimal("3000.00"),
+            discount=Decimal("500.00"),
+            payment_date=self.today,
+            payment_method="Cash",
+        )
+        self.record.discount = Decimal("500.00")
+        self.record.save()
+
+        # Delete payment via API
+        del_res = self.client.delete(f"/api/payments/{p.id}/")
+        self.assertEqual(del_res.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.discount, Decimal("0.00"))
+        self.assertEqual(self.record.total_paid, Decimal("0.00"))
+        self.assertEqual(self.record.outstanding, Decimal("10000.00"))
+        self.assertEqual(self.record.payment_status, "UNPAID")
+
 
 

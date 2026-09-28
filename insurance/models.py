@@ -41,6 +41,12 @@ class InsuranceRecord(models.Model):
     policy_start_date = models.DateField()
     policy_expiry_date = models.DateField(db_index=True)
     total_premium = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Discount given in Rs (applicable only for full payment)",
+    )
     alternative_mobile_number = models.CharField(
         max_length=20,
         blank=True,
@@ -81,6 +87,16 @@ class InsuranceRecord(models.Model):
                 veh_info = f" ({existing.vehicle.vehicle_number})" if existing and existing.vehicle else ""
                 raise ValidationError({
                     "policy_number": f"Policy number '{self.policy_number}' is already registered to {cust_info}{veh_info}. Policy numbers must be unique."
+                })
+
+        # Validate discount amount
+        if self.discount is not None:
+            if self.discount < Decimal("0.00"):
+                raise ValidationError({"discount": "Discount cannot be negative."})
+            total_prem = self.total_premium or Decimal("0.00")
+            if self.discount > total_prem:
+                raise ValidationError({
+                    "discount": f"Discount (₹{self.discount}) cannot exceed total premium (₹{total_prem})."
                 })
 
         # Validate that only one active policy can exist per vehicle
@@ -142,6 +158,12 @@ class InsuranceRecord(models.Model):
         return "active"
 
     @property
+    def net_premium(self) -> Decimal:
+        total_prem = self.total_premium if self.total_premium is not None else Decimal("0.00")
+        disc = self.discount if self.discount is not None else Decimal("0.00")
+        return max(Decimal("0.00"), total_prem - disc).quantize(Decimal("0.01"))
+
+    @property
     def total_paid(self) -> Decimal:
         total = self.payments.aggregate(total=models.Sum("amount"))["total"]
         if total is None:
@@ -151,17 +173,17 @@ class InsuranceRecord(models.Model):
     @property
     def outstanding(self) -> Decimal:
         total_paid = self.total_paid
-        total_premium = self.total_premium if self.total_premium is not None else Decimal("0.00")
-        diff = total_premium - total_paid
+        net_prem = self.net_premium
+        diff = max(Decimal("0.00"), net_prem - total_paid)
         return Decimal(str(diff)).quantize(Decimal("0.01"))
 
     @property
     def payment_status(self) -> str:
         total_paid = self.total_paid
-        total_premium = self.total_premium if self.total_premium is not None else Decimal("0.00")
-        if total_paid <= Decimal("0.00"):
+        net_prem = self.net_premium
+        if total_paid <= Decimal("0.00") and net_prem > Decimal("0.00"):
             return "UNPAID"
-        elif total_paid < total_premium:
+        elif total_paid < net_prem:
             return "PARTIAL"
         else:
             return "PAID"

@@ -149,9 +149,14 @@ class DashboardSummaryApiTests(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
         past_date = timezone.localdate() - timezone.timedelta(days=10)
         # Create a record in the past
+        vehicle_past = Vehicle.objects.create(
+            customer=self.customer,
+            vehicle_number="MH-12-PAST-01",
+            vehicle_type="Four Wheeler",
+        )
         rec_past = InsuranceRecord.objects.create(
             customer=self.customer,
-            vehicle=self.vehicle1,
+            vehicle=vehicle_past,
             insurance_company=self.company1,
             policy_number="POL-PAST-1",
             entry_date=past_date,
@@ -232,6 +237,39 @@ class DashboardSummaryApiTests(APITestCase):
         self.assertEqual(len(custom_summary), 6)
         expected_keys = ["2024-01", "2024-02", "2024-03", "2024-04", "2024-05", "2024-06"]
         self.assertEqual([item["month_key"] for item in custom_summary], expected_keys)
+
+    def test_dashboard_summary_discount_kpi(self):
+        """Test that discount is correctly calculated in dashboard KPIs and payment status."""
+        today = timezone.localdate()
+        veh_disc = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH-99-ZZ-0001", vehicle_type="Car"
+        )
+        rec_disc = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=veh_disc,
+            insurance_company=self.company1,
+            policy_number="POL-DISC-DASH-1",
+            entry_date=today,
+            policy_start_date=today,
+            policy_expiry_date=today + timezone.timedelta(days=365),
+            total_premium=Decimal("10000.00"),
+            discount=Decimal("1000.00"),
+        )
+        Payment.objects.create(
+            insurance_record=rec_disc,
+            amount=Decimal("9000.00"),
+            payment_date=today,
+        )
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        kpis = res.data["kpis"]
+        self.assertIn("today_discount", kpis)
+        self.assertIn("total_discount", kpis)
+        self.assertGreaterEqual(kpis["total_discount"], 1000.0)
+        self.assertEqual(rec_disc.outstanding, Decimal("0.00"))
+        self.assertEqual(rec_disc.payment_status, "PAID")
 
 
 class DashboardNotificationsApiTests(APITestCase):
@@ -330,5 +368,150 @@ class DashboardNotificationsApiTests(APITestCase):
         policy_numbers = [r["policy_number"] for r in data["records"]]
         self.assertNotIn("POL-YEST-002", policy_numbers)
         self.assertNotIn("POL-TOM-003", policy_numbers)
+
+
+class EntryDateAttributionAndDiscountTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="attribution_admin",
+            email="attr@test.com",
+            password="testpassword123",
+        )
+        self.token = Token.objects.create(user=self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        self.company = InsuranceCompany.objects.create(name="Star Health", is_active=True)
+        self.customer = Customer.objects.create(name="Vikram Singh", phone="9988776655")
+        self.vehicle = Vehicle.objects.create(
+            customer=self.customer, vehicle_number="MH-01-XY-9999", vehicle_type="Car"
+        )
+
+    def test_cross_month_payment_attributed_to_policy_entry_date(self):
+        """
+        Policy 123 is created/entered in August with total_premium = 10,000.
+        Payment 1: 6,000 paid in August (2026-08-15).
+        Payment 2: 4,000 paid in September (2026-09-10).
+
+        Dashboard when filtered for August:
+        - Must show total_premium = 10,000
+        - Must attribute the September payment to this August policy:
+          received = 10,000, outstanding = 0.
+        - Equation holds: total_premium == received + discount + outstanding
+
+        Dashboard when filtered for September:
+        - Must NOT inflate September with the 4,000 payment for August policy.
+        - total_premium = 0, received = 0, outstanding = 0.
+        """
+        aug_entry = timezone.datetime(2026, 8, 15).date()
+        sept_pay_date = timezone.datetime(2026, 9, 10).date()
+
+        record = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle,
+            insurance_company=self.company,
+            policy_number="POL-AUG-123",
+            entry_date=aug_entry,
+            policy_start_date=aug_entry,
+            policy_expiry_date=aug_entry + timezone.timedelta(days=365),
+            total_premium=Decimal("10000.00"),
+            discount=Decimal("0.00"),
+        )
+
+        # Payment 1 in August
+        Payment.objects.create(
+            insurance_record=record,
+            amount=Decimal("6000.00"),
+            discount=Decimal("0.00"),
+            payment_date=aug_entry,
+            payment_method="Cash",
+        )
+
+        # Payment 2 in September
+        Payment.objects.create(
+            insurance_record=record,
+            amount=Decimal("4000.00"),
+            discount=Decimal("0.00"),
+            payment_date=sept_pay_date,
+            payment_method="UPI",
+        )
+
+        # 1. Query August dashboard
+        aug_res = self.client.get(
+            "/api/dashboard/summary/?range=custom&start_date=2026-08-01&end_date=2026-08-31"
+        )
+        self.assertEqual(aug_res.status_code, status.HTTP_200_OK)
+        aug_kpis = aug_res.data["kpis"]
+        self.assertEqual(aug_kpis["today_entries"], 1)
+        self.assertEqual(float(aug_kpis["today_premium"]), 10000.0)
+        self.assertEqual(float(aug_kpis["today_received"]), 10000.0)
+        self.assertEqual(float(aug_kpis["today_discount"]), 0.0)
+        self.assertEqual(float(aug_kpis["total_outstanding"]), 0.0)
+        # Check equation: Premium = Received + Discount + Outstanding
+        self.assertEqual(
+            float(aug_kpis["today_premium"]),
+            float(aug_kpis["today_received"]) + float(aug_kpis["today_discount"]) + float(aug_kpis["total_outstanding"])
+        )
+
+        # 2. Query September dashboard
+        sept_res = self.client.get(
+            "/api/dashboard/summary/?range=custom&start_date=2026-09-01&end_date=2026-09-30"
+        )
+        self.assertEqual(sept_res.status_code, status.HTTP_200_OK)
+        sept_kpis = sept_res.data["kpis"]
+        self.assertEqual(sept_kpis["today_entries"], 0)
+        self.assertEqual(float(sept_kpis["today_premium"]), 0.0)
+        self.assertEqual(float(sept_kpis["today_received"]), 0.0)
+        self.assertEqual(float(sept_kpis["today_discount"]), 0.0)
+        self.assertEqual(float(sept_kpis["total_outstanding"]), 0.0)
+
+    def test_dashboard_with_discount_equation(self):
+        """
+        Record with premium 15,000:
+        Payment 1: 5,000 received + 1,000 discount.
+        Payment 2: 4,000 received + 0 discount.
+        Outstanding = 15,000 - 9,000 - 1,000 = 5,000.
+        Verify dashboard KPIs preserve: today_premium == today_received + today_discount + total_outstanding.
+        """
+        entry_d = timezone.datetime(2026, 7, 10).date()
+        record = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=self.vehicle,
+            insurance_company=self.company,
+            policy_number="POL-DISC-777",
+            entry_date=entry_d,
+            policy_start_date=entry_d,
+            policy_expiry_date=entry_d + timezone.timedelta(days=365),
+            total_premium=Decimal("15000.00"),
+            discount=Decimal("1000.00"),
+        )
+        Payment.objects.create(
+            insurance_record=record,
+            amount=Decimal("5000.00"),
+            discount=Decimal("1000.00"),
+            payment_date=entry_d,
+            payment_method="Bank Transfer",
+        )
+        Payment.objects.create(
+            insurance_record=record,
+            amount=Decimal("4000.00"),
+            discount=Decimal("0.00"),
+            payment_date=entry_d + timezone.timedelta(days=5),
+            payment_method="Cash",
+        )
+
+        res = self.client.get(
+            "/api/dashboard/summary/?range=custom&start_date=2026-07-01&end_date=2026-07-31"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        kpis = res.data["kpis"]
+        self.assertEqual(kpis["today_entries"], 1)
+        self.assertEqual(float(kpis["today_premium"]), 15000.0)
+        self.assertEqual(float(kpis["today_received"]), 9000.0)
+        self.assertEqual(float(kpis["today_discount"]), 1000.0)
+        self.assertEqual(float(kpis["total_outstanding"]), 5000.0)
+        self.assertEqual(
+            float(kpis["today_premium"]),
+            float(kpis["today_received"]) + float(kpis["today_discount"]) + float(kpis["total_outstanding"])
+        )
+
 
 

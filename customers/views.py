@@ -79,6 +79,7 @@ class CustomerViewSet(
         records_qs = customer.insurance_records.all()
         total_records = records_qs.count()
         total_premium = records_qs.aggregate(total=Sum("total_premium"))["total"] or Decimal("0.00")
+        total_discount = records_qs.aggregate(total=Sum("discount"))["total"] or Decimal("0.00")
 
         from payments.models import Payment
         total_paid = Payment.objects.filter(
@@ -86,7 +87,7 @@ class CustomerViewSet(
         ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
         total_outstanding = max(
-            Decimal("0.00"), Decimal(str(total_premium)) - Decimal(str(total_paid))
+            Decimal("0.00"), Decimal(str(total_premium)) - Decimal(str(total_discount)) - Decimal(str(total_paid))
         )
 
         customer_vehicles = customer.vehicles.annotate(
@@ -97,6 +98,7 @@ class CustomerViewSet(
         data = dict(serializer.data)
         data["total_records"] = total_records
         data["total_premium"] = str(total_premium)
+        data["total_discount"] = str(total_discount)
         data["total_paid"] = str(total_paid)
         data["total_outstanding"] = str(total_outstanding)
         data["vehicles"] = CustomerVehicleDetailSerializer(customer_vehicles, many=True).data

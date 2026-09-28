@@ -1,11 +1,13 @@
 import datetime
 from datetime import timedelta
+from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -207,10 +209,10 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             if payment_status_filter == "UNPAID":
                 queryset = queryset.filter(annotated_paid__lte=0)
             elif payment_status_filter == "PAID":
-                queryset = queryset.filter(annotated_paid__gte=F("total_premium"))
+                queryset = queryset.filter(annotated_paid__gte=F("total_premium") - F("discount"))
             elif payment_status_filter == "PARTIAL":
                 queryset = queryset.filter(
-                    annotated_paid__gt=0, annotated_paid__lt=F("total_premium")
+                    annotated_paid__gt=0, annotated_paid__lt=F("total_premium") - F("discount")
                 )
 
         # 7. Sorting / Ordering
@@ -553,9 +555,12 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         if "policy_expiry_date" not in data or not data["policy_expiry_date"]:
             start = datetime.date.fromisoformat(str(data["policy_start_date"]))
             try:
-                data["policy_expiry_date"] = str(start.replace(year=start.year + 1))
+                # 1 year policy coverage: 1 year later minus 1 day (e.g., 03-Sep-2024 to 02-Sep-2025)
+                one_year_later = start.replace(year=start.year + 1)
+                data["policy_expiry_date"] = str(one_year_later - timedelta(days=1))
             except ValueError:
-                data["policy_expiry_date"] = str(start + timedelta(days=365))
+                # Leap day handling (Feb 29 -> Feb 28 next year)
+                data["policy_expiry_date"] = str(start.replace(year=start.year + 1, day=28))
 
         if "total_premium" not in data or not data["total_premium"]:
             data["total_premium"] = str(old_record.total_premium)
@@ -700,6 +705,8 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                     {
                         "insurance_record_id": record.id,
                         "total_premium": f"{record.total_premium:.2f}",
+                        "discount": f"{record.discount:.2f}",
+                        "net_premium": f"{record.net_premium:.2f}",
                         "total_paid": f"{record.total_paid:.2f}",
                         "outstanding": f"{record.outstanding:.2f}",
                         "status": record.payment_status,
@@ -715,9 +722,40 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         # POST
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
         data["insurance_record_id"] = record.id
+
+        # Handle discount when recording payment
+        raw_discount = request.data.get("discount")
+        discount_amount = Decimal("0.00")
+        if raw_discount is not None and str(raw_discount).strip() != "":
+            try:
+                discount_amount = Decimal(str(raw_discount).strip())
+                if discount_amount < Decimal("0.00"):
+                    raise ValidationError({"discount": "Discount cannot be negative."})
+            except (ValueError, TypeError):
+                discount_amount = Decimal("0.00")
+
+        data["discount"] = discount_amount
+
         serializer = PaymentSerializer(data=data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        serializer.save(insurance_record=record)
+        pay_amount = serializer.validated_data.get("amount", Decimal("0.00"))
+
+        total_prem = record.total_premium or Decimal("0.00")
+        current_paid = record.total_paid
+        current_discount = record.discount or Decimal("0.00")
+        remaining_balance = max(Decimal("0.00"), total_prem - current_discount - current_paid)
+
+        if (pay_amount + discount_amount) > remaining_balance:
+            raise ValidationError({
+                "amount": f"Total payment (₹{pay_amount:.2f}) plus discount (₹{discount_amount:.2f}) cannot exceed remaining balance (₹{remaining_balance:.2f})."
+            })
+
+        payment_instance = serializer.save(insurance_record=record, discount=discount_amount)
+
+        if discount_amount > Decimal("0.00"):
+            record.discount = current_discount + discount_amount
+            record.save(update_fields=["discount", "updated_at"])
+
         record.refresh_from_db()
 
         # Auto WhatsApp Payment Receipt Trigger
@@ -727,9 +765,8 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
 
             wa_cfg = WhatsAppConfig.get_config()
             if wa_cfg.is_enabled and wa_cfg.auto_send_payment_receipt:
-                payment_inst = serializer.instance
-                if payment_inst:
-                    WhatsAppClient.send_payment_received_notification(payment_inst, async_send=True)
+                if payment_instance:
+                    WhatsAppClient.send_payment_received_notification(payment_instance, async_send=True)
         except Exception:
             pass
 
@@ -738,6 +775,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 "message": "Payment recorded successfully.",
                 "data": serializer.data,
                 "total_paid": f"{record.total_paid:.2f}",
+                "discount": f"{record.discount:.2f}",
                 "outstanding": f"{record.outstanding:.2f}",
                 "payment_status": record.payment_status,
                 "status": record.payment_status,
@@ -752,7 +790,11 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         """
         record = self.get_object()
         payment = get_object_or_404(record.payments.all(), pk=payment_id)
+        p_disc = payment.discount or Decimal("0.00")
         payment.delete()
+        if p_disc > Decimal("0.00"):
+            record.discount = max(Decimal("0.00"), (record.discount or Decimal("0.00")) - p_disc)
+            record.save(update_fields=["discount", "updated_at"])
         return Response(
             {"message": "Payment deleted successfully."},
             status=status.HTTP_200_OK,
@@ -774,6 +816,8 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             {
                 "insurance_record_id": record.id,
                 "total_premium": f"{record.total_premium:.2f}",
+                "discount": f"{record.discount:.2f}",
+                "net_premium": f"{record.net_premium:.2f}",
                 "total_paid": f"{record.total_paid:.2f}",
                 "outstanding": f"{record.outstanding:.2f}",
                 "status": record.payment_status,

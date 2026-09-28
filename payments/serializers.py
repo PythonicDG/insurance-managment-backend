@@ -10,6 +10,9 @@ class PaymentSerializer(serializers.ModelSerializer):
         source="insurance_record",
         required=False,
     )
+    discount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, default=Decimal("0.00")
+    )
     # Support payment_mode alias from frontend
     payment_mode = serializers.CharField(source="payment_method", required=False)
     # Support date alias from frontend
@@ -26,6 +29,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             "insurance_record",
             "insurance_record_id",
             "amount",
+            "discount",
             "payment_method",
             "payment_mode",
             "payment_date",
@@ -59,9 +63,21 @@ class PaymentSerializer(serializers.ModelSerializer):
         return super().to_internal_value(mutable_data)
 
     def validate_amount(self, value):
-        if value <= Decimal("0.00"):
-            raise serializers.ValidationError("Payment amount must be greater than zero.")
+        if value < Decimal("0.00"):
+            raise serializers.ValidationError("Payment amount cannot be negative.")
         return value
+
+    def validate_discount(self, value):
+        if value is not None and value < Decimal("0.00"):
+            raise serializers.ValidationError("Discount cannot be negative.")
+        return value
+
+    def validate(self, attrs):
+        amount = attrs.get("amount", Decimal("0.00"))
+        discount = attrs.get("discount", Decimal("0.00"))
+        if amount <= Decimal("0.00") and discount <= Decimal("0.00"):
+            raise serializers.ValidationError({"amount": "Payment amount or discount must be greater than zero."})
+        return attrs
 
 
 class LedgerRecordSerializer(serializers.ModelSerializer):
@@ -80,6 +96,8 @@ class LedgerRecordSerializer(serializers.ModelSerializer):
     outstanding = serializers.DecimalField(
         max_digits=12, decimal_places=2, source="annotated_outstanding", read_only=True
     )
+    discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_premium = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     status = serializers.CharField(source="annotated_status", read_only=True)
     payment_status = serializers.CharField(read_only=True)
     payments_count = serializers.IntegerField(source="payments.count", read_only=True)
@@ -93,6 +111,8 @@ class LedgerRecordSerializer(serializers.ModelSerializer):
             "policy_start_date",
             "policy_expiry_date",
             "total_premium",
+            "discount",
+            "net_premium",
             "paid_amount",
             "outstanding",
             "status",
@@ -118,4 +138,5 @@ class LedgerSummarySerializer(serializers.Serializer):
     total_customers_pending = serializers.IntegerField()
     total_received = serializers.DecimalField(max_digits=14, decimal_places=2)
     total_premium = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_discount = serializers.DecimalField(max_digits=14, decimal_places=2)
 
