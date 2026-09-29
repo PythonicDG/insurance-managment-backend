@@ -567,12 +567,23 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         - Preserves documents & payments on old record.
         """
         visible_record = self.get_object()
-        old_record = InsuranceRecord.objects.select_for_update().select_related(
-            "customer", "vehicle", "insurance_company", "previous_policy", "renewed_policy"
-        ).get(pk=visible_record.pk)
+        # PostgreSQL cannot apply FOR UPDATE to nullable OUTER JOINs. Lock only
+        # the source policy row and keep the nullable renewal relationships out
+        # of this query. The separate successor query below runs after the lock
+        # is acquired, which also protects against concurrent double renewals.
+        old_record = (
+            InsuranceRecord.objects.select_related(
+                "customer", "vehicle", "insurance_company"
+            )
+            .select_for_update(of=("self",))
+            .get(pk=visible_record.pk)
+        )
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
 
-        if old_record.successor is not None:
+        existing_renewal = InsuranceRecord.objects.filter(
+            previous_policy=old_record
+        ).first()
+        if existing_renewal is not None:
             raise ValidationError({"detail": "This policy has already been renewed."})
         if old_record.lifecycle_status in ["scheduled", "renewed"]:
             raise ValidationError({"detail": "Only a current or unrenewed expired policy can be renewed."})
