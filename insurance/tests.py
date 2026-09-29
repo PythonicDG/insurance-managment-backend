@@ -398,6 +398,41 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertNotIn("POL-EXP-10D", today_policies)
         self.assertNotIn("POL-EXP-11D", today_policies)
 
+    def test_future_start_policy_is_filtered_as_scheduled_without_renewal_link(self):
+        customer = Customer.objects.create(name="Future Policy", phone="9988776600")
+        vehicle = Vehicle.objects.create(
+            customer=customer,
+            vehicle_number="MH12FP6600",
+            vehicle_type="Car",
+        )
+        future_record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="POL-FUTURE-STANDALONE",
+            policy_start_date=self.today + datetime.timedelta(days=2),
+            policy_expiry_date=self.next_year,
+            total_premium=5000,
+        )
+
+        self.assertFalse(future_record.is_active)
+        self.assertIsNone(future_record.previous_policy_id)
+        self.assertEqual(future_record.lifecycle_status, "scheduled")
+
+        response = self.client.get("/api/insurance/records/?status=scheduled")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        scheduled_ids = [item["id"] for item in response.data["results"]]
+        self.assertIn(future_record.id, scheduled_ids)
+
+        # A standalone scheduled policy also becomes current on its start date.
+        InsuranceRecord.objects.filter(pk=future_record.pk).update(
+            policy_start_date=self.today
+        )
+        InsuranceRecord.activate_due_scheduled(vehicle_id=vehicle.id)
+        future_record.refresh_from_db()
+        self.assertTrue(future_record.is_active)
+        self.assertEqual(future_record.lifecycle_status, "current")
+
     def test_record_details(self):
         """Test retrieving insurance record details."""
         customer = Customer.objects.create(name="Rohit Verma", phone="9777777777")
@@ -740,7 +775,7 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertFalse(res_none.data["has_active_policy"])
 
     def test_renew_endpoint(self):
-        """Test POST /api/insurance/records/<id>/renew/ archives old policy and creates new active policy."""
+        """An early renewal keeps current coverage and creates a linked scheduled policy."""
         customer = Customer.objects.create(name="Kavita Rao", phone="9876543204")
         vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12IJ5555", vehicle_type="Car")
         old_record = InsuranceRecord.objects.create(
@@ -764,10 +799,14 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertEqual(res.data["previous_record_id"], old_record.id)
 
         old_record.refresh_from_db()
-        self.assertFalse(old_record.is_active)
+        self.assertTrue(old_record.is_active)
+        self.assertEqual(old_record.lifecycle_status, "current")
 
         new_rec = InsuranceRecord.objects.get(policy_number="RENEW-POL-5555")
-        self.assertTrue(new_rec.is_active)
+        self.assertFalse(new_rec.is_active)
+        self.assertEqual(new_rec.lifecycle_status, "scheduled")
+        self.assertEqual(new_rec.previous_policy_id, old_record.id)
+        self.assertEqual(res.data["renewal_kind"], "scheduled")
         self.assertEqual(new_rec.vehicle_id, vehicle.id)
         self.assertEqual(InsuranceRecord.objects.filter(vehicle=vehicle).count(), 2)
 
@@ -775,6 +814,114 @@ class InsuranceRecordAPITestCase(APITestCase):
         hist_res = self.client.get(f"/api/insurance/records/{new_rec.id}/vehicle-history/")
         self.assertEqual(hist_res.status_code, status.HTTP_200_OK)
         self.assertEqual(hist_res.data["total_records"], 2)
+
+        scheduled_res = self.client.get("/api/insurance/records/?status=scheduled")
+        scheduled_ids = [item["id"] for item in scheduled_res.data["results"]]
+        self.assertIn(new_rec.id, scheduled_ids)
+
+        expiring_res = self.client.get("/api/insurance/records/?status=expiring_soon")
+        expiring_ids = [item["id"] for item in expiring_res.data["results"]]
+        self.assertNotIn(old_record.id, expiring_ids)
+
+        # A linked policy cannot be renewed twice.
+        duplicate_res = self.client.post(
+            f"/api/insurance/records/{old_record.id}/renew/",
+            {"policy_number": "DUPLICATE-RENEWAL", "total_premium": "10000.00"},
+            format="json",
+        )
+        self.assertEqual(duplicate_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # When the scheduled start date arrives, promotion is automatic.
+        InsuranceRecord.objects.filter(pk=old_record.pk).update(
+            policy_expiry_date=self.today - datetime.timedelta(days=1)
+        )
+        InsuranceRecord.objects.filter(pk=new_rec.pk).update(
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+        )
+        InsuranceRecord.activate_due_scheduled(vehicle_id=vehicle.id)
+        old_record.refresh_from_db()
+        new_rec.refresh_from_db()
+        self.assertFalse(old_record.is_active)
+        self.assertEqual(old_record.lifecycle_status, "renewed")
+        self.assertTrue(new_rec.is_active)
+        self.assertEqual(new_rec.lifecycle_status, "current")
+
+    def test_expired_policy_renewal_becomes_current_and_old_record_is_history(self):
+        customer = Customer.objects.create(name="Expired Renewal", phone="9876500099")
+        vehicle = Vehicle.objects.create(
+            customer=customer,
+            vehicle_number="MH12ER0099",
+            vehicle_type="Car",
+        )
+        old_record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="OLD-EXPIRED-0099",
+            policy_start_date=self.past_date,
+            policy_expiry_date=self.today - datetime.timedelta(days=1),
+            total_premium=9000,
+        )
+
+        res = self.client.post(
+            f"/api/insurance/records/{old_record.id}/renew/",
+            {
+                "policy_number": "CURRENT-RENEWAL-0099",
+                "policy_start_date": str(self.today),
+                "policy_expiry_date": str(self.next_year),
+                "total_premium": "11000.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        old_record.refresh_from_db()
+        new_record = InsuranceRecord.objects.get(policy_number="CURRENT-RENEWAL-0099")
+        self.assertFalse(old_record.is_active)
+        self.assertEqual(old_record.lifecycle_status, "renewed")
+        self.assertTrue(new_record.is_active)
+        self.assertEqual(new_record.lifecycle_status, "current")
+        self.assertEqual(new_record.previous_policy_id, old_record.id)
+        self.assertEqual(res.data["renewal_kind"], "current")
+
+        needs_renewal = self.client.get("/api/insurance/records/?status=needs_renewal")
+        ids = [item["id"] for item in needs_renewal.data["results"]]
+        self.assertNotIn(old_record.id, ids)
+
+    def test_early_renewal_rejects_overlapping_future_coverage(self):
+        customer = Customer.objects.create(name="Overlap Test", phone="9876500088")
+        vehicle = Vehicle.objects.create(
+            customer=customer,
+            vehicle_number="MH12OV0088",
+            vehicle_type="Car",
+        )
+        old_record = InsuranceRecord.objects.create(
+            customer=customer,
+            vehicle=vehicle,
+            insurance_company=self.company,
+            policy_number="CURRENT-OVERLAP-0088",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=9000,
+        )
+
+        res = self.client.post(
+            f"/api/insurance/records/{old_record.id}/renew/",
+            {
+                "policy_number": "OVERLAP-RENEWAL-0088",
+                "policy_start_date": str(self.today + datetime.timedelta(days=30)),
+                "policy_expiry_date": str(self.next_year + datetime.timedelta(days=30)),
+                "total_premium": "11000.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("policy_start_date", res.data)
+        old_record.refresh_from_db()
+        self.assertTrue(old_record.is_active)
+        self.assertFalse(InsuranceRecord.objects.filter(policy_number="OVERLAP-RENEWAL-0088").exists())
 
     def test_alternative_mobile_number_handling(self):
         """Test creating record with alternative_mobile_number, searching, and auto-syncing."""

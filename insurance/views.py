@@ -90,9 +90,10 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
+        InsuranceRecord.activate_due_scheduled()
         queryset = (
             InsuranceRecord.objects.select_related(
-                "customer", "vehicle", "insurance_company"
+                "customer", "vehicle", "insurance_company", "previous_policy", "renewed_policy"
             )
             .prefetch_related("documents", "payments")
             .all()
@@ -176,21 +177,44 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         if policy_expiry_to:
             queryset = queryset.filter(policy_expiry_date__lte=policy_expiry_to)
 
-        # 5. Status Filter (active / expired / expiring_soon / expiring_today)
+        # 5. Operational lifecycle filters. Expired and expiring lists only
+        # contain policies that still need action (no linked renewal).
         record_status = params.get("status", "").strip().lower()
         today = timezone.localdate()
-        if record_status == "active":
-            queryset = queryset.filter(policy_expiry_date__gte=today)
-        elif record_status == "expired":
-            queryset = queryset.filter(policy_expiry_date__lt=today)
+        if record_status in ["active", "current"]:
+            queryset = queryset.filter(
+                is_active=True,
+                policy_start_date__lte=today,
+                policy_expiry_date__gte=today,
+            )
+        elif record_status in ["expired", "needs_renewal"]:
+            queryset = queryset.filter(
+                policy_expiry_date__lt=today,
+                renewed_policy__isnull=True,
+            )
         elif record_status in ["expiring_soon", "expiring"]:
             ten_days_later = today + timedelta(days=10)
             queryset = queryset.filter(
+                is_active=True,
+                renewed_policy__isnull=True,
                 policy_expiry_date__gte=today,
                 policy_expiry_date__lte=ten_days_later,
             )
         elif record_status in ["expiring_today", "today"]:
-            queryset = queryset.filter(policy_expiry_date=today)
+            queryset = queryset.filter(
+                is_active=True,
+                renewed_policy__isnull=True,
+                policy_expiry_date=today,
+            )
+        elif record_status == "scheduled":
+            queryset = queryset.filter(
+                is_active=False,
+                policy_start_date__gt=today,
+            )
+        elif record_status in ["renewed", "history"]:
+            queryset = queryset.filter(
+                renewed_policy__isnull=False,
+            ).filter(Q(is_active=False) | Q(policy_expiry_date__lt=today))
 
         # 6. Payment Status Filter (UNPAID, PARTIAL, PAID)
         payment_status_filter = params.get("payment_status", "").strip().upper()
@@ -397,9 +421,10 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             )
 
         today = timezone.localdate()
+        InsuranceRecord.activate_due_scheduled(vehicle_id=vehicle.id)
         records_qs = (
             InsuranceRecord.objects.select_related(
-                "customer", "vehicle", "insurance_company"
+                "customer", "vehicle", "insurance_company", "previous_policy", "renewed_policy"
             )
             .prefetch_related("documents", "payments")
             .filter(vehicle=vehicle)
@@ -439,15 +464,18 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         # Sync any record with policy_expiry_date < today to is_active=False
         active_record = None
         expired_records = []
+        scheduled_records = []
         for r in all_records:
             if r.policy_expiry_date < today and r.is_active:
                 r.is_active = False
                 r.save(update_fields=["is_active"])
 
-            if r.is_active and r.policy_expiry_date >= today:
+            if r.is_active and r.policy_start_date <= today <= r.policy_expiry_date:
                 if not active_record:
                     active_record = r
-            else:
+            elif r.policy_start_date > today:
+                scheduled_records.append(r)
+            elif r.policy_expiry_date < today:
                 expired_records.append(r)
 
         if active_record:
@@ -465,6 +493,12 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                     "has_active_policy": True,
                     "active_record": detail_data,
                     "has_expired_policy": len(expired_records) > 0,
+                    "has_scheduled_renewal": len(scheduled_records) > 0,
+                    "scheduled_record": (
+                        InsuranceRecordDetailSerializer(scheduled_records[0], context={"request": request}).data
+                        if scheduled_records
+                        else None
+                    ),
                     "latest_expired_record": (
                         InsuranceRecordDetailSerializer(expired_records[0], context={"request": request}).data
                         if expired_records
@@ -499,12 +533,23 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 "customer_alternative_mobile_number": vehicle.customer.alternative_mobile_number if vehicle.customer else "",
                 "has_active_policy": False,
                 "active_record": None,
-                "has_expired_policy": True,
+                "has_expired_policy": len(expired_records) > 0,
+                "has_scheduled_renewal": len(scheduled_records) > 0,
+                "scheduled_record": (
+                    InsuranceRecordDetailSerializer(scheduled_records[0], context={"request": request}).data
+                    if scheduled_records
+                    else None
+                ),
                 "latest_expired_record": latest_data,
                 "history_count": len(expired_records),
                 "message": (
-                    f"Previous insurance for vehicle '{vehicle.vehicle_number}' is expired. "
-                    "Creating a new insurance record is allowed, and old records will be kept as history."
+                    f"A renewal is already scheduled for vehicle '{vehicle.vehicle_number}' "
+                    f"from {scheduled_records[0].policy_start_date}."
+                    if scheduled_records
+                    else (
+                        f"Previous insurance for vehicle '{vehicle.vehicle_number}' is expired. "
+                        "Creating a new insurance record is allowed, and old records will be kept as history."
+                    )
                 ),
             },
             status=status.HTTP_200_OK,
@@ -516,19 +561,21 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         """
         POST /api/insurance/records/<id>/renew/
         Renew an existing insurance policy:
-        - Marks old record as is_active=False (keeps in history).
-        - Creates new insurance record with is_active=True.
+        - Links the new policy to the old policy.
+        - Keeps early renewals scheduled until their start date.
+        - Replaces the old policy immediately when the new coverage starts now.
         - Preserves documents & payments on old record.
         """
-        old_record = self.get_object()
+        visible_record = self.get_object()
+        old_record = InsuranceRecord.objects.select_for_update().select_related(
+            "customer", "vehicle", "insurance_company", "previous_policy", "renewed_policy"
+        ).get(pk=visible_record.pk)
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
 
-        # 1. Archive old record
-        old_record.is_active = False
-        old_record.save(update_fields=["is_active", "updated_at"])
-
-        # Also ensure no other record for this vehicle is marked active
-        InsuranceRecord.objects.filter(vehicle=old_record.vehicle, is_active=True).update(is_active=False)
+        if old_record.successor is not None:
+            raise ValidationError({"detail": "This policy has already been renewed."})
+        if old_record.lifecycle_status in ["scheduled", "renewed"]:
+            raise ValidationError({"detail": "Only a current or unrenewed expired policy can be renewed."})
 
         # 2. Prepare payload for new record
         # Inherit customer & vehicle if not specified
@@ -566,6 +613,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
             data["total_premium"] = str(old_record.total_premium)
 
         data["is_renewal"] = True
+        data["renew_from_id"] = old_record.id
 
         serializer = InsuranceRecordCreateUpdateSerializer(
             data=data, context={"request": request}
@@ -587,11 +635,19 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         detail_serializer = InsuranceRecordDetailSerializer(
             new_record, context={"request": request}
         )
+        renewal_kind = "scheduled" if new_record.lifecycle_status == "scheduled" else "current"
+        message = (
+            f"Policy renewal scheduled successfully. Policy #{old_record.policy_number} remains current until "
+            f"{old_record.policy_expiry_date}."
+            if renewal_kind == "scheduled"
+            else f"Policy renewed successfully. Previous policy #{old_record.policy_number} is now in renewal history."
+        )
         return Response(
             {
-                "message": f"Policy renewed successfully. Previous policy #{old_record.policy_number} has been archived to history.",
+                "message": message,
                 "data": detail_serializer.data,
                 "previous_record_id": old_record.id,
+                "renewal_kind": renewal_kind,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -605,7 +661,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         record = self.get_object()
         records = (
             InsuranceRecord.objects.select_related(
-                "customer", "vehicle", "insurance_company"
+                "customer", "vehicle", "insurance_company", "previous_policy", "renewed_policy"
             )
             .prefetch_related("documents", "payments")
             .filter(vehicle=record.vehicle)

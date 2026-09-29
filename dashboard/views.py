@@ -193,6 +193,7 @@ class DashboardSummaryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
+        InsuranceRecord.activate_due_scheduled()
         today = timezone.localdate()
         try:
             months_count = int(request.query_params.get("months", 6))
@@ -293,8 +294,13 @@ class DashboardSummaryView(APIView):
         total_policies = InsuranceRecord.objects.count()
 
         ten_days_later = today + timedelta(days=10)
-        expiring_today_count = InsuranceRecord.objects.filter(policy_expiry_date=today).count()
+        expiring_today_count = InsuranceRecord.objects.filter(
+            policy_expiry_date=today,
+            renewed_policy__isnull=True,
+        ).count()
         expiring_soon_count = InsuranceRecord.objects.filter(
+            is_active=True,
+            renewed_policy__isnull=True,
             policy_expiry_date__gte=today,
             policy_expiry_date__lte=ten_days_later,
         ).count()
@@ -468,7 +474,10 @@ class DashboardSummaryView(APIView):
         # 5. Expiring Today Records (Policies whose expiry date is today)
         # ---------------------------------------------------------------------
         expiring_today_qs = (
-            InsuranceRecord.objects.filter(policy_expiry_date=today)
+            InsuranceRecord.objects.filter(
+                policy_expiry_date=today,
+                renewed_policy__isnull=True,
+            )
             .select_related("customer", "vehicle", "insurance_company")
             .prefetch_related("payments")
             .order_by("-created_at")
@@ -588,11 +597,15 @@ class DashboardNotificationsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
+        InsuranceRecord.activate_due_scheduled()
         today = timezone.localdate()
 
         # Query strictly policies expiring today (policy_expiry_date == today)
         records_qs = (
-            InsuranceRecord.objects.filter(policy_expiry_date=today)
+            InsuranceRecord.objects.filter(
+                policy_expiry_date=today,
+                renewed_policy__isnull=True,
+            )
             .select_related("customer", "vehicle", "insurance_company")
             .prefetch_related("payments")
             .order_by("-created_at")
@@ -644,5 +657,3 @@ class DashboardNotificationsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
-
-

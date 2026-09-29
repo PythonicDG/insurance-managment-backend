@@ -2,6 +2,7 @@ from decimal import Decimal
 import os
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db import transaction
 from django.utils import timezone
 
 
@@ -55,6 +56,14 @@ class InsuranceRecord(models.Model):
         verbose_name="Alternative Mobile Number",
     )
     remarks = models.TextField(blank=True, default="")
+    previous_policy = models.OneToOneField(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="renewed_policy",
+        help_text="The policy record that this policy renewed.",
+    )
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -124,8 +133,15 @@ class InsuranceRecord(models.Model):
         if self.alternative_mobile_number:
             from customers.models import Customer
             self.alternative_mobile_number = Customer.normalize_phone(self.alternative_mobile_number)
-        # If policy has already expired by date, automatically set is_active to False
-        if self.policy_expiry_date and self.policy_expiry_date < timezone.localdate():
+        # Future policies are scheduled, and past policies are historical.
+        today = timezone.localdate()
+        if (
+            self.policy_start_date
+            and self.policy_start_date > today
+        ) or (
+            self.policy_expiry_date
+            and self.policy_expiry_date < today
+        ):
             self.is_active = False
         self.clean()
         super().save(*args, **kwargs)
@@ -156,6 +172,67 @@ class InsuranceRecord(models.Model):
         elif days <= 10:
             return "expiring_soon"
         return "active"
+
+    @property
+    def successor(self):
+        """Return the linked renewal without leaking RelatedObjectDoesNotExist."""
+        try:
+            return self.renewed_policy
+        except InsuranceRecord.DoesNotExist:
+            return None
+
+    @property
+    def lifecycle_status(self) -> str:
+        """Operational status used by renewal follow-up and the records UI."""
+        today = timezone.localdate()
+        successor = self.successor
+
+        if successor is not None:
+            if self.is_active and self.policy_expiry_date >= today:
+                return "current"
+            return "renewed"
+
+        if self.policy_start_date > today:
+            return "scheduled"
+        if self.policy_expiry_date < today:
+            return "expired"
+        if self.is_active:
+            if self.policy_expiry_date == today:
+                return "expiring_today"
+            if self.days_left <= 10:
+                return "expiring_soon"
+            return "current"
+        return "inactive"
+
+    @property
+    def needs_renewal(self) -> bool:
+        return self.policy_expiry_date < timezone.localdate() and self.successor is None
+
+    @classmethod
+    def activate_due_scheduled(cls, vehicle_id=None):
+        """Promote due scheduled renewals and retire the previous current policy."""
+        today = timezone.localdate()
+        candidates = cls.objects.filter(
+            renewed_policy__isnull=True,
+            is_active=False,
+            policy_start_date__lte=today,
+            policy_expiry_date__gte=today,
+        )
+        if vehicle_id is not None:
+            candidates = candidates.filter(vehicle_id=vehicle_id)
+
+        # Portable implementation (SQLite and PostgreSQL): the latest due leaf
+        # wins if legacy data somehow contains more than one for a vehicle.
+        chosen = {}
+        for candidate in candidates.order_by("vehicle_id", "-policy_start_date", "-id"):
+            chosen.setdefault(candidate.vehicle_id, candidate)
+
+        for candidate in chosen.values():
+            with transaction.atomic():
+                cls.objects.filter(vehicle_id=candidate.vehicle_id, is_active=True).exclude(
+                    pk=candidate.pk
+                ).update(is_active=False)
+                cls.objects.filter(pk=candidate.pk).update(is_active=True)
 
     @property
     def net_premium(self) -> Decimal:

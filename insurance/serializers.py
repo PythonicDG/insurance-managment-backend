@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
@@ -99,6 +100,14 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
     payment_status = serializers.CharField(read_only=True)
     paid_amount = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
     balance = serializers.DecimalField(source="outstanding", max_digits=12, decimal_places=2, read_only=True)
+    lifecycle_status = serializers.CharField(read_only=True)
+    needs_renewal = serializers.BooleanField(read_only=True)
+    previous_policy_id = serializers.IntegerField(read_only=True)
+    renewed_policy_id = serializers.SerializerMethodField()
+
+    def get_renewed_policy_id(self, obj):
+        successor = obj.successor
+        return successor.id if successor else None
 
     class Meta:
         model = InsuranceRecord
@@ -120,6 +129,10 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
             "is_expired",
             "days_left",
             "status",
+            "lifecycle_status",
+            "needs_renewal",
+            "previous_policy_id",
+            "renewed_policy_id",
             "documents_count",
             "payments",
             "transactions",
@@ -151,6 +164,14 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
     payment_status = serializers.CharField(read_only=True)
     paid_amount = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
     balance = serializers.DecimalField(source="outstanding", max_digits=12, decimal_places=2, read_only=True)
+    lifecycle_status = serializers.CharField(read_only=True)
+    needs_renewal = serializers.BooleanField(read_only=True)
+    previous_policy_id = serializers.IntegerField(read_only=True)
+    renewed_policy_id = serializers.SerializerMethodField()
+
+    def get_renewed_policy_id(self, obj):
+        successor = obj.successor
+        return successor.id if successor else None
 
     class Meta:
         model = InsuranceRecord
@@ -180,6 +201,10 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
             "is_expired",
             "days_left",
             "status",
+            "lifecycle_status",
+            "needs_renewal",
+            "previous_policy_id",
+            "renewed_policy_id",
             "created_at",
             "updated_at",
         ]
@@ -224,6 +249,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
     payment_date = serializers.DateField(required=False, write_only=True)
     payment_notes = serializers.CharField(required=False, allow_blank=True, write_only=True)
     is_renewal = serializers.BooleanField(required=False, default=False, write_only=True)
+    renew_from_id = serializers.IntegerField(required=False, write_only=True)
 
     class Meta:
         model = InsuranceRecord
@@ -239,6 +265,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             "remarks",
             "is_active",
             "is_renewal",
+            "renew_from_id",
             "insurance_company",
             "insurance_company_id",
             "customer",
@@ -648,7 +675,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         if "entry_date" not in validated_data or not validated_data.get("entry_date"):
             validated_data["entry_date"] = timezone.localdate()
 
-        # Check vehicle active insurance & renewal
+        # Check vehicle current insurance and renewal lineage.
         is_renewal = (
             validated_data.pop("is_renewal", False)
             or self.initial_data.get("is_renewal", False)
@@ -656,7 +683,13 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         if isinstance(is_renewal, str):
             is_renewal = is_renewal.lower() in ("true", "1", "yes")
 
+        renew_from_id = validated_data.pop("renew_from_id", None) or self.initial_data.get(
+            "renew_from_id"
+        )
+
         today = timezone.localdate()
+        InsuranceRecord.activate_due_scheduled(vehicle_id=vehicle.id)
+
         # Any existing record whose policy_expiry_date < today is marked inactive
         for old_rec in InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True):
             if old_rec.policy_expiry_date < today:
@@ -664,6 +697,56 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                 old_rec.save(update_fields=["is_active"])
 
         active_rec = InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True).first()
+        scheduled_rec = InsuranceRecord.objects.filter(
+            vehicle=vehicle,
+            is_active=False,
+            renewed_policy__isnull=True,
+            policy_start_date__gt=today,
+        ).first()
+        previous_policy = None
+        if is_renewal:
+            if not renew_from_id:
+                raise serializers.ValidationError(
+                    {"renew_from_id": "The policy being renewed is required."}
+                )
+            try:
+                previous_policy = InsuranceRecord.objects.select_related(
+                    "vehicle", "customer"
+                ).get(pk=renew_from_id)
+            except InsuranceRecord.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"renew_from_id": "The policy being renewed was not found."}
+                )
+
+            if previous_policy.vehicle_id != vehicle.id:
+                raise serializers.ValidationError(
+                    {"renew_from_id": "The renewal must belong to the same vehicle."}
+                )
+            if previous_policy.successor is not None:
+                raise serializers.ValidationError(
+                    {"renew_from_id": "This policy has already been renewed."}
+                )
+
+            start_date = validated_data.get("policy_start_date")
+            expiry_date = validated_data.get("policy_expiry_date")
+            if expiry_date and expiry_date < today:
+                raise serializers.ValidationError(
+                    {"policy_expiry_date": "A renewed policy cannot already be expired."}
+                )
+            if (
+                start_date
+                and start_date > today
+                and start_date <= previous_policy.policy_expiry_date
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "policy_start_date": (
+                            "A scheduled renewal must start after the current policy expires. "
+                            f"Choose {previous_policy.policy_expiry_date + timedelta(days=1)} or later."
+                        )
+                    }
+                )
+
         if active_rec:
             if not is_renewal:
                 raise serializers.ValidationError({
@@ -675,17 +758,39 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
                     "active_record_id": active_rec.id,
                     "active_policy_number": active_rec.policy_number,
                 })
-            else:
-                # Renewal: archive current active record to history
+            elif active_rec.id != previous_policy.id:
+                raise serializers.ValidationError(
+                    {
+                        "renew_from_id": (
+                            f"Policy #{active_rec.policy_number} is the current policy for this vehicle. "
+                            "Renew that policy instead."
+                        )
+                    }
+                )
+            elif validated_data.get("policy_start_date") <= today:
+                # Immediate renewal: the new policy replaces current coverage now.
                 active_rec.is_active = False
                 active_rec.save(update_fields=["is_active"])
+        elif scheduled_rec and not is_renewal:
+            raise serializers.ValidationError(
+                {
+                    "vehicle_number": (
+                        f"Scheduled policy #{scheduled_rec.policy_number} already exists for "
+                        f"vehicle '{vehicle.vehicle_number}' and starts on "
+                        f"{scheduled_rec.policy_start_date}."
+                    ),
+                    "scheduled_record_id": scheduled_rec.id,
+                }
+            )
 
-        # Ensure all other older records for this vehicle are is_active=False
-        InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True).update(is_active=False)
-
-        # Set is_active for the new record
+        # Future-start renewals are scheduled. Current-dated renewals become active.
+        start_date = validated_data.get("policy_start_date")
         exp_date = validated_data.get("policy_expiry_date")
-        validated_data["is_active"] = not (exp_date and exp_date < today)
+        validated_data["is_active"] = bool(
+            start_date and exp_date and start_date <= today <= exp_date
+        )
+        if previous_policy is not None:
+            validated_data["previous_policy"] = previous_policy
 
         # Ensure alternative_mobile_number is captured
         alt_phone = (

@@ -158,7 +158,10 @@ class CustomerViewSet(
     def records(self, request, pk=None):
         """Returns all insurance records for this customer."""
         customer = self.get_object()
+        from insurance.models import InsuranceRecord
         from insurance.serializers import InsuranceRecordListSerializer
+
+        InsuranceRecord.activate_due_scheduled()
 
         ordering = request.query_params.get("ordering", "-entry_date")
         valid_orderings = [
@@ -176,7 +179,7 @@ class CustomerViewSet(
 
         records_qs = (
             customer.insurance_records.select_related(
-                "vehicle", "insurance_company", "customer"
+                "vehicle", "insurance_company", "customer", "previous_policy", "renewed_policy"
             )
             .prefetch_related("documents", "payments")
             .order_by(ordering, "-created_at")
