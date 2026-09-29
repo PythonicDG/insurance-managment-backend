@@ -57,6 +57,60 @@ class HttpOnlyCookieAuthenticationTests(TestCase):
         self.assertIn("token", response.data)
         self.assertIn("insure_token", response.cookies)
 
+    def test_remember_me_cannot_create_a_persistent_auth_cookie(self):
+        response = self.client.post(
+            "/api/auth/login/",
+            {
+                "username": self.username,
+                "password": self.password,
+                "remember_me": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        cookie = response.cookies["insure_token"]
+        self.assertEqual(cookie["max-age"], "")
+        self.assertEqual(cookie["expires"], "")
+
+    def test_second_login_invalidates_first_device(self):
+        first_device = APIClient()
+        second_device = APIClient()
+
+        first_login = first_device.post(
+            "/api/auth/login/",
+            {
+                "username": self.username,
+                "password": self.password,
+                "include_token": True,
+            },
+            format="json",
+        )
+        first_token = first_login.data["token"]
+
+        second_login = second_device.post(
+            "/api/auth/login/",
+            {
+                "username": self.username,
+                "password": self.password,
+                "include_token": True,
+            },
+            format="json",
+        )
+        second_token = second_login.data["token"]
+
+        self.assertNotEqual(first_token, second_token)
+        self.assertFalse(Token.objects.filter(key=first_token).exists())
+        self.assertTrue(Token.objects.filter(key=second_token).exists())
+        self.assertEqual(
+            first_device.get("/api/auth/profile/").status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+        self.assertEqual(
+            second_device.get("/api/auth/profile/").status_code,
+            status.HTTP_200_OK,
+        )
+
     def test_authenticated_request_via_httponly_cookie(self):
         """
         Verify that protected endpoints authenticate successfully

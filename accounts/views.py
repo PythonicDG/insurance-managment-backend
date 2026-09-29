@@ -1,5 +1,6 @@
 from django.conf import settings
-from django.contrib.auth import logout
+from django.contrib.auth.models import User
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.views import APIView
@@ -15,23 +16,20 @@ from .serializers import (
 )
 
 
-def set_auth_cookie(response, token_key, remember_me=False):
+def set_auth_cookie(response, token_key):
     """
     Sets the authentication token in a secure HttpOnly cookie.
     - HttpOnly: Prevents client-side scripts (XSS attacks) from reading the token.
     - Secure: Transmitted only over HTTPS in production.
     - SameSite=Lax: Protects against CSRF while allowing navigation across same-site subdomains.
-    - max_age: 14 days if remember_me is True, None (session-only, expires on browser close) if False.
+    - No max_age/expires: the cookie is always browser-session-only.
     """
     is_secure = not settings.DEBUG
     samesite = getattr(settings, "AUTH_COOKIE_SAMESITE", "Lax")
     domain = getattr(settings, "AUTH_COOKIE_DOMAIN", None)
-    max_age = (14 * 24 * 60 * 60) if remember_me else None
-
     response.set_cookie(
         key="insure_token",
         value=token_key,
-        max_age=max_age,
         httponly=True,
         secure=is_secure,
         samesite=samesite,
@@ -65,19 +63,20 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        user = serializer.validated_data["user"]
+        authenticated_user = serializer.validated_data["user"]
 
-        # Ensure any old token is removed to prevent stale sessions
-        Token.objects.filter(user=user).delete()
-        token = Token.objects.create(user=user)
+        # Serialize logins for this account and rotate its token. This makes the
+        # newly logged-in browser the only device with a valid credential.
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(pk=authenticated_user.pk)
+            Token.objects.filter(user=user).delete()
+            token = Token.objects.create(user=user)
 
-        # Initialize/refresh user session activity
-        UserSessionActivity.objects.update_or_create(
-            user=user,
-            defaults={"last_activity": timezone.now()},
-        )
+            UserSessionActivity.objects.update_or_create(
+                user=user,
+                defaults={"last_activity": timezone.now()},
+            )
 
-        remember_me = bool(request.data.get("remember_me", False))
         raw_include = request.data.get("include_token", None)
         if isinstance(raw_include, str):
             include_token = raw_include.strip().lower() in ("true", "1")
@@ -98,7 +97,7 @@ class LoginView(APIView):
             resp_data["token"] = token.key
 
         response = Response(resp_data, status=status.HTTP_200_OK)
-        return set_auth_cookie(response, token.key, remember_me=remember_me)
+        return set_auth_cookie(response, token.key)
 
 
 class LogoutView(APIView):
@@ -190,4 +189,4 @@ class ChangePasswordView(APIView):
             status=status.HTTP_200_OK
         )
         return delete_auth_cookie(response)
-
+
