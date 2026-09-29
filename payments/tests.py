@@ -897,5 +897,143 @@ class PaymentDiscountAndEquationTests(APITestCase):
         self.assertEqual(self.record.outstanding, Decimal("10000.00"))
         self.assertEqual(self.record.payment_status, "UNPAID")
 
+    def test_remaining_balance_cleared_as_discount_with_zero_amount(self):
+        """
+        Customer has premium 3000, pays initial 2500 (outstanding 500).
+        Later, agent clears remaining 500 as discount with amount 0.
+        Result: record becomes PAID, outstanding 0, total_paid remains 2500, discount becomes 500.
+        """
+        veh2 = Vehicle.objects.create(customer=self.customer, vehicle_number="MH04AA2222", vehicle_type="Car")
+        rec = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=veh2,
+            insurance_company=self.company,
+            policy_number="POL-ZERO-AMOUNT-001",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("3000.00"),
+            discount=Decimal("0.00"),
+        )
+        # Payment 1: 2500 paid
+        p1 = Payment.objects.create(
+            insurance_record=rec,
+            amount=Decimal("2500.00"),
+            discount=Decimal("0.00"),
+            payment_method="UPI",
+            payment_date=self.today,
+            notes="First payment",
+        )
+        rec.refresh_from_db()
+        self.assertEqual(rec.total_paid, Decimal("2500.00"))
+        self.assertEqual(rec.outstanding, Decimal("500.00"))
+        self.assertEqual(rec.payment_status, "PARTIAL")
+
+        # Payment 2 via API: Add payment with amount=0 and discount=500
+        res = self.client.post(
+            "/api/payments/",
+            {
+                "insurance_record_id": rec.id,
+                "amount": "0.00",
+                "discount": "500.00",
+                "payment_method": "Discount / Waiver",
+                "notes": "Remaining 500 waived as discount",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec.refresh_from_db()
+
+        self.assertEqual(rec.total_paid, Decimal("2500.00"))
+        self.assertEqual(rec.discount, Decimal("500.00"))
+        self.assertEqual(rec.outstanding, Decimal("0.00"))
+        self.assertEqual(rec.payment_status, "PAID")
+        self.assertEqual(rec.payments.count(), 2)
+
+        # Equation holds
+        self.assertEqual(rec.total_premium, rec.total_paid + rec.discount + rec.outstanding)
+
+    def test_record_payments_nested_action_clearing_discount_with_zero_amount(self):
+        """
+        Test the nested endpoint /api/insurance/records/<id>/payments/ with amount=0 and discount=500.
+        """
+        veh3 = Vehicle.objects.create(customer=self.customer, vehicle_number="MH04AA3333", vehicle_type="Car")
+        rec = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=veh3,
+            insurance_company=self.company,
+            policy_number="POL-ZERO-NESTED-001",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("3000.00"),
+            discount=Decimal("0.00"),
+        )
+        # Initial payment 2500
+        Payment.objects.create(
+            insurance_record=rec,
+            amount=Decimal("2500.00"),
+            discount=Decimal("0.00"),
+            payment_method="Cash",
+            payment_date=self.today,
+        )
+
+        res = self.client.post(
+            f"/api/insurance/records/{rec.id}/payments/",
+            {
+                "amount": "0",
+                "discount": "500.00",
+                "payment_method": "Discount / Waiver",
+                "notes": "Remaining cleared as discount",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec.refresh_from_db()
+        self.assertEqual(rec.total_paid, Decimal("2500.00"))
+        self.assertEqual(rec.discount, Decimal("500.00"))
+        self.assertEqual(rec.outstanding, Decimal("0.00"))
+        self.assertEqual(rec.payment_status, "PAID")
+
+    def test_full_policy_discount_with_zero_payment(self):
+        """
+        A policy with total_premium=3000 where 100% discount (3000) is given with 0 paid.
+        Verify status is PAID, outstanding is 0, and LedgerViewSet annotates it as 'Paid'.
+        """
+        veh4 = Vehicle.objects.create(customer=self.customer, vehicle_number="MH04AA4444", vehicle_type="Car")
+        rec = InsuranceRecord.objects.create(
+            customer=self.customer,
+            vehicle=veh4,
+            insurance_company=self.company,
+            policy_number="POL-FULL-DISC-001",
+            policy_start_date=self.today,
+            policy_expiry_date=self.next_year,
+            total_premium=Decimal("3000.00"),
+            discount=Decimal("0.00"),
+        )
+
+        res = self.client.post(
+            "/api/payments/",
+            {
+                "insurance_record_id": rec.id,
+                "amount": "0.00",
+                "discount": "3000.00",
+                "payment_method": "Discount / Waiver",
+                "notes": "Full policy discounted",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec.refresh_from_db()
+        self.assertEqual(rec.total_paid, Decimal("0.00"))
+        self.assertEqual(rec.discount, Decimal("3000.00"))
+        self.assertEqual(rec.outstanding, Decimal("0.00"))
+        self.assertEqual(rec.payment_status, "PAID")
+
+        # Verify ledger view annotated status
+        ledger_res = self.client.get(f"/api/payments/ledger/{rec.id}/")
+        self.assertEqual(ledger_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(ledger_res.data["status"], "Paid")
+        self.assertEqual(Decimal(str(ledger_res.data["outstanding"])), Decimal("0.00"))
+
+
 
 

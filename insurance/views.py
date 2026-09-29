@@ -231,7 +231,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
                 )
             )
             if payment_status_filter == "UNPAID":
-                queryset = queryset.filter(annotated_paid__lte=0)
+                queryset = queryset.filter(annotated_paid__lte=0, total_premium__gt=F("discount"))
             elif payment_status_filter == "PAID":
                 queryset = queryset.filter(annotated_paid__gte=F("total_premium") - F("discount"))
             elif payment_status_filter == "PARTIAL":

@@ -238,8 +238,8 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             )
             .annotate(
                 annotated_status=Case(
-                    When(annotated_paid__lte=Decimal("0.00"), then=Value("Outstanding")),
                     When(annotated_paid__gte=F("total_premium") - F("discount"), then=Value("Paid")),
+                    When(annotated_paid__lte=Decimal("0.00"), then=Value("Outstanding")),
                     default=Value("Partial"),
                     output_field=CharField(),
                 )
@@ -285,7 +285,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             if payment_status in ["outstanding_partial", "outstanding & partial", "pending"]:
                 queryset = queryset.filter(annotated_outstanding__gt=0)
             elif payment_status in ["outstanding", "unpaid"]:
-                queryset = queryset.filter(annotated_paid__lte=0)
+                queryset = queryset.filter(annotated_paid__lte=0, annotated_outstanding__gt=0)
             elif payment_status == "partial":
                 queryset = queryset.filter(annotated_paid__gt=0, annotated_paid__lt=F("total_premium") - F("discount"))
             elif payment_status == "paid":
