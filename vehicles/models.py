@@ -1,8 +1,9 @@
+from config.soft_delete import SoftDeleteModel
 import re
 from django.db import models
 
 
-class Vehicle(models.Model):
+class Vehicle(SoftDeleteModel):
     customer = models.ForeignKey(
         "customers.Customer",
         on_delete=models.CASCADE,
@@ -14,6 +15,8 @@ class Vehicle(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["-created_at"]
         verbose_name = "Vehicle"
         verbose_name_plural = "Vehicles"

@@ -225,7 +225,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
 
             queryset = queryset.annotate(
                 annotated_paid=Coalesce(
-                    Sum("payments__amount"),
+                    Sum("payments__amount", filter=Q(payments__deleted_at__isnull=True)),
                     Decimal("0.00"),
                     output_field=DecimalField(),
                 )
@@ -857,11 +857,7 @@ class InsuranceRecordViewSet(viewsets.ModelViewSet):
         """
         record = self.get_object()
         payment = get_object_or_404(record.payments.all(), pk=payment_id)
-        p_disc = payment.discount or Decimal("0.00")
         payment.delete()
-        if p_disc > Decimal("0.00"):
-            record.discount = max(Decimal("0.00"), (record.discount or Decimal("0.00")) - p_disc)
-            record.save(update_fields=["discount", "updated_at"])
         return Response(
             {"message": "Payment deleted successfully."},
             status=status.HTTP_200_OK,

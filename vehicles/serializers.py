@@ -1,8 +1,9 @@
+from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
 from .models import Vehicle
 
 
-class VehicleSerializer(serializers.ModelSerializer):
+class VehicleSerializer(SoftDeleteModelSerializer):
     customer_name = serializers.CharField(source="customer.name", read_only=True)
     customer_phone = serializers.CharField(source="customer.phone", read_only=True)
 
@@ -26,7 +27,7 @@ class VehicleSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Vehicle number cannot be empty.")
 
         instance = getattr(self, "instance", None)
-        qs = Vehicle.objects.filter(vehicle_number__iexact=normalized)
+        qs = Vehicle.all_objects.filter(vehicle_number__iexact=normalized)
         if instance:
             qs = qs.exclude(pk=instance.pk)
         if qs.exists():

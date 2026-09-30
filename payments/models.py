@@ -1,10 +1,11 @@
+from config.soft_delete import SoftDeleteModel
 from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
 
-class Payment(models.Model):
+class Payment(SoftDeleteModel):
     insurance_record = models.ForeignKey(
         "insurance.InsuranceRecord",
         on_delete=models.CASCADE,
@@ -24,6 +25,8 @@ class Payment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["-payment_date", "-created_at"]
         verbose_name = "Payment"
         verbose_name_plural = "Payments"

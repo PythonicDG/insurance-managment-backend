@@ -1,10 +1,11 @@
+from config.soft_delete import SoftDeleteModel
 from django.core.exceptions import ValidationError
 from django.db import models
 
 from .schema import FIELD_CHOICES, FIELDS, normalize_header
 
 
-class UploadTemplate(models.Model):
+class UploadTemplate(SoftDeleteModel):
     name = models.CharField(max_length=150, unique=True)
     target = models.CharField(max_length=20, choices=[("customers", "Customers"), ("insurance", "Insurance records")])
     description = models.TextField(blank=True)
@@ -13,6 +14,8 @@ class UploadTemplate(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["name"]
         verbose_name = "Bulk upload template"
 
@@ -20,7 +23,7 @@ class UploadTemplate(models.Model):
         return self.name
 
 
-class UploadColumn(models.Model):
+class UploadColumn(SoftDeleteModel):
     template = models.ForeignKey(UploadTemplate, on_delete=models.CASCADE, related_name="columns")
     column_name = models.CharField(max_length=150, help_text="Header displayed in the downloadable Excel template.")
     field_name = models.CharField(max_length=60, choices=FIELD_CHOICES)
@@ -31,6 +34,8 @@ class UploadColumn(models.Model):
     is_active = models.BooleanField(default=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["position", "id"]
         verbose_name = "Upload column"
 
@@ -46,7 +51,7 @@ class UploadColumn(models.Model):
             raise ValidationError({"field_name": "This field is not available for the selected template type."})
 
 
-class UploadReceipt(models.Model):
+class UploadReceipt(SoftDeleteModel):
     """Prevents a successful preview from being imported twice."""
     token_hash = models.CharField(max_length=64, unique=True)
     template = models.ForeignKey(UploadTemplate, on_delete=models.PROTECT)

@@ -91,7 +91,7 @@ class CustomerViewSet(
         )
 
         customer_vehicles = customer.vehicles.annotate(
-            records_count=Count("insurance_records")
+            records_count=Count("insurance_records", filter=Q(insurance_records__deleted_at__isnull=True))
         ).order_by("-created_at")
 
         serializer = self.get_serializer(customer)
@@ -194,7 +194,7 @@ class CustomerViewSet(
         """Returns all vehicles owned by this customer with linked records count."""
         customer = self.get_object()
         customer_vehicles = customer.vehicles.annotate(
-            records_count=Count("insurance_records")
+            records_count=Count("insurance_records", filter=Q(insurance_records__deleted_at__isnull=True))
         ).order_by("-created_at")
         serializer = CustomerVehicleDetailSerializer(customer_vehicles, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)

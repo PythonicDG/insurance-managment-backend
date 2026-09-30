@@ -1,10 +1,11 @@
+from config.serializers import SoftDeleteModelSerializer
 from decimal import Decimal
 from rest_framework import serializers
 from insurance.models import InsuranceRecord
 from .models import Payment
 
 
-class PaymentSerializer(serializers.ModelSerializer):
+class PaymentSerializer(SoftDeleteModelSerializer):
     insurance_record_id = serializers.PrimaryKeyRelatedField(
         queryset=InsuranceRecord.objects.all(),
         source="insurance_record",
@@ -80,7 +81,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class LedgerRecordSerializer(serializers.ModelSerializer):
+class LedgerRecordSerializer(SoftDeleteModelSerializer):
     customer_id = serializers.IntegerField(source="customer.id", read_only=True)
     customer_name = serializers.CharField(source="customer.name", read_only=True)
     customer_phone = serializers.CharField(source="customer.phone", read_only=True)

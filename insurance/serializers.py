@@ -1,3 +1,4 @@
+from config.serializers import SoftDeleteModelSerializer
 from datetime import timedelta
 from decimal import Decimal
 from django.db import transaction
@@ -10,7 +11,7 @@ from payments.serializers import PaymentSerializer
 from .models import InsuranceCompany, InsuranceDocument, InsuranceRecord
 
 
-class InsuranceCompanySerializer(serializers.ModelSerializer):
+class InsuranceCompanySerializer(SoftDeleteModelSerializer):
     class Meta:
         model = InsuranceCompany
         fields = [
@@ -28,7 +29,7 @@ class InsuranceCompanySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Company name cannot be empty.")
 
         instance = getattr(self, "instance", None)
-        qs = InsuranceCompany.objects.filter(name__iexact=trimmed)
+        qs = InsuranceCompany.all_objects.filter(name__iexact=trimmed)
         if instance:
             qs = qs.exclude(pk=instance.pk)
         if qs.exists():
@@ -37,7 +38,7 @@ class InsuranceCompanySerializer(serializers.ModelSerializer):
         return trimmed
 
 
-class InsuranceDocumentSerializer(serializers.ModelSerializer):
+class InsuranceDocumentSerializer(SoftDeleteModelSerializer):
     file_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -65,25 +66,25 @@ class InsuranceDocumentSerializer(serializers.ModelSerializer):
         return None
 
 
-class RecordCustomerSummarySerializer(serializers.ModelSerializer):
+class RecordCustomerSummarySerializer(SoftDeleteModelSerializer):
     class Meta:
         model = Customer
         fields = ["id", "name", "phone", "alternative_mobile_number", "email", "address"]
 
 
-class RecordVehicleSummarySerializer(serializers.ModelSerializer):
+class RecordVehicleSummarySerializer(SoftDeleteModelSerializer):
     class Meta:
         model = Vehicle
         fields = ["id", "vehicle_type", "vehicle_number"]
 
 
-class RecordCompanySummarySerializer(serializers.ModelSerializer):
+class RecordCompanySummarySerializer(SoftDeleteModelSerializer):
     class Meta:
         model = InsuranceCompany
         fields = ["id", "name", "is_active"]
 
 
-class InsuranceRecordListSerializer(serializers.ModelSerializer):
+class InsuranceRecordListSerializer(SoftDeleteModelSerializer):
     customer = RecordCustomerSummarySerializer(read_only=True)
     vehicle = RecordVehicleSummarySerializer(read_only=True)
     insurance_company = RecordCompanySummarySerializer(read_only=True)
@@ -147,7 +148,7 @@ class InsuranceRecordListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
+class InsuranceRecordDetailSerializer(SoftDeleteModelSerializer):
     customer = RecordCustomerSummarySerializer(read_only=True)
     vehicle = RecordVehicleSummarySerializer(read_only=True)
     insurance_company = RecordCompanySummarySerializer(read_only=True)
@@ -211,7 +212,7 @@ class InsuranceRecordDetailSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
+class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
     # Insurance company link
     insurance_company_id = serializers.PrimaryKeyRelatedField(
         queryset=InsuranceCompany.objects.all(),
@@ -306,7 +307,7 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
         if not trimmed:
             raise serializers.ValidationError("Policy number cannot be empty.")
 
-        queryset = InsuranceRecord.objects.select_related("customer", "vehicle").filter(
+        queryset = InsuranceRecord.all_objects.select_related("customer", "vehicle").filter(
             policy_number__iexact=trimmed
         )
         if self.instance:
@@ -602,6 +603,13 @@ class InsuranceRecordCreateUpdateSerializer(serializers.ModelSerializer):
             normalized_number = Vehicle.normalize_vehicle_number(vehicle_number)
             if not normalized_number:
                 raise serializers.ValidationError({"vehicle_number": "Valid vehicle number is required."})
+
+            if Vehicle.all_objects.filter(
+                vehicle_number__iexact=normalized_number, deleted_at__isnull=False
+            ).exists():
+                raise serializers.ValidationError({
+                    "vehicle_number": "This vehicle is archived. Restore its original record before using it."
+                })
 
             vehicle, created = Vehicle.get_or_create_vehicle(
                 customer=customer,

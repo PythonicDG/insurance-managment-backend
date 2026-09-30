@@ -33,9 +33,9 @@ class ExpiringTokenAuthentication(TokenAuthentication):
 
         # Update last activity timestamp for tracking without expiring or deleting tokens
         try:
-            UserSessionActivity.objects.update_or_create(
+            UserSessionActivity.all_objects.update_or_create(
                 user=user,
-                defaults={"last_activity": timezone.now()},
+                defaults={"last_activity": timezone.now(), "deleted_at": None, "deletion_batch": None},
             )
         except Exception:
             pass

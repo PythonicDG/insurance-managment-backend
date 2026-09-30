@@ -1,3 +1,4 @@
+from config.admin import SoftDeleteAdmin
 from django.contrib import admin
 from .models import InsuranceCompany, InsuranceDocument, InsuranceRecord
 
@@ -10,7 +11,7 @@ class InsuranceDocumentInline(admin.TabularInline):
 
 
 @admin.register(InsuranceCompany)
-class InsuranceCompanyAdmin(admin.ModelAdmin):
+class InsuranceCompanyAdmin(SoftDeleteAdmin):
     list_display = ("name", "is_active", "created_at", "updated_at")
     list_filter = ("is_active",)
     search_fields = ("name",)
@@ -25,7 +26,7 @@ class PaymentInline(admin.TabularInline):
 
 
 @admin.register(InsuranceRecord)
-class InsuranceRecordAdmin(admin.ModelAdmin):
+class InsuranceRecordAdmin(SoftDeleteAdmin):
     list_display = (
         "policy_number",
         "customer",
@@ -60,6 +61,6 @@ class InsuranceRecordAdmin(admin.ModelAdmin):
 
 
 @admin.register(InsuranceDocument)
-class InsuranceDocumentAdmin(admin.ModelAdmin):
+class InsuranceDocumentAdmin(SoftDeleteAdmin):
     list_display = ("document_name", "record", "file_size", "uploaded_at")
     search_fields = ("document_name", "record__policy_number")

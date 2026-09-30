@@ -68,7 +68,7 @@ class UploadView(APIView):
                     if payload.get("user") != request.user.pk or payload.get("file") != digest or payload.get("config") != config_hash:
                         raise ValidationError({"error": "The file or template has changed. Validate it again before importing."})
                     token_hash = hashlib.sha256(token.encode()).hexdigest()
-                    if UploadReceipt.objects.filter(token_hash=token_hash).exists():
+                    if UploadReceipt.all_objects.filter(token_hash=token_hash).exists():
                         raise ValidationError({"error": "This upload has already been imported."})
                     # Unique receipt also protects against concurrent replay requests.
                     receipt = UploadReceipt.objects.create(token_hash=token_hash, template=template, user=request.user)

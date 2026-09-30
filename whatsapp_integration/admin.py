@@ -1,9 +1,10 @@
+from config.admin import SoftDeleteAdmin
 from django.contrib import admin
 from .models import WhatsAppConfig, WhatsAppMessageLog
 
 
 @admin.register(WhatsAppConfig)
-class WhatsAppConfigAdmin(admin.ModelAdmin):
+class WhatsAppConfigAdmin(SoftDeleteAdmin):
     list_display = (
         "id",
         "is_enabled",
@@ -63,7 +64,7 @@ class WhatsAppConfigAdmin(admin.ModelAdmin):
 
 
 @admin.register(WhatsAppMessageLog)
-class WhatsAppMessageLogAdmin(admin.ModelAdmin):
+class WhatsAppMessageLogAdmin(SoftDeleteAdmin):
     list_display = (
         "id",
         "recipient_phone",

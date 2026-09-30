@@ -1,9 +1,10 @@
+from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
 from .models import Customer
 from vehicles.models import Vehicle
 
 
-class CustomerVehicleSummarySerializer(serializers.ModelSerializer):
+class CustomerVehicleSummarySerializer(SoftDeleteModelSerializer):
     records_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
@@ -18,7 +19,7 @@ class CustomerVehicleSummarySerializer(serializers.ModelSerializer):
         ]
 
 
-class CustomerVehicleDetailSerializer(serializers.ModelSerializer):
+class CustomerVehicleDetailSerializer(SoftDeleteModelSerializer):
     records_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
@@ -33,7 +34,7 @@ class CustomerVehicleDetailSerializer(serializers.ModelSerializer):
         ]
 
 
-class CustomerSerializer(serializers.ModelSerializer):
+class CustomerSerializer(SoftDeleteModelSerializer):
     customer_id = serializers.IntegerField(source="id", read_only=True)
     vehicles_count = serializers.IntegerField(source="vehicles.count", read_only=True)
 
@@ -88,7 +89,7 @@ class CustomerDetailSerializer(CustomerSerializer):
         ]
 
 
-class CustomerDocumentSerializer(serializers.ModelSerializer):
+class CustomerDocumentSerializer(SoftDeleteModelSerializer):
     record_id = serializers.IntegerField(source="record.id", read_only=True)
     policy_number = serializers.CharField(source="record.policy_number", read_only=True)
     vehicle_number = serializers.CharField(source="record.vehicle.vehicle_number", read_only=True)

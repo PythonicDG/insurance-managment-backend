@@ -1,8 +1,9 @@
+from config.soft_delete import SoftDeleteModel
 from django.db import models
 from django.contrib.auth.hashers import make_password, check_password
 
 
-class BusinessSettings(models.Model):
+class BusinessSettings(SoftDeleteModel):
     business_name = models.CharField(max_length=255, default="InsureLedger Agency")
     logo = models.ImageField(upload_to="business_logos/", null=True, blank=True)
     phone = models.CharField(max_length=30, blank=True, default="")
@@ -17,6 +18,8 @@ class BusinessSettings(models.Model):
     pin_otp_expires_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         verbose_name = "Business Settings"
         verbose_name_plural = "Business Settings"
 

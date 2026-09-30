@@ -7,6 +7,9 @@ from django.db.models import (
     DecimalField,
     F,
     Q,
+    OuterRef,
+    Subquery,
+    IntegerField,
     Sum,
     When,
 )
@@ -138,7 +141,7 @@ def calculate_business_summary(
     records_in_range = (
         InsuranceRecord.objects.filter(entry_date__gte=range_start, entry_date__lte=range_end)
         .annotate(
-            paid_total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
+            paid_total=Coalesce(Sum("payments__amount", filter=Q(payments__deleted_at__isnull=True)), Decimal("0.00"), output_field=DecimalField())
         )
         .values("entry_date", "total_premium", "discount", "paid_total")
     )
@@ -271,7 +274,7 @@ class DashboardSummaryView(APIView):
 
             # Received payments anchored to records entered in this period (regardless of when paid)
             period_received_aggr = period_records.aggregate(
-                total=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField())
+                total=Coalesce(Sum("payments__amount", filter=Q(payments__deleted_at__isnull=True)), Decimal("0.00"), output_field=DecimalField())
             )
             period_received = float(period_received_aggr["total"] or Decimal("0.00"))
 
@@ -338,7 +341,7 @@ class DashboardSummaryView(APIView):
             base_status_records = InsuranceRecord.objects.all()
 
         records_with_payments = base_status_records.annotate(
-            paid_sum=Coalesce(Sum("payments__amount"), Decimal("0.00"), output_field=DecimalField()),
+            paid_sum=Coalesce(Sum("payments__amount", filter=Q(payments__deleted_at__isnull=True)), Decimal("0.00"), output_field=DecimalField()),
             net_prem_annot=Case(
                 When(total_premium__gt=F("discount"), then=F("total_premium") - F("discount")),
                 default=Decimal("0.00"),
@@ -397,55 +400,38 @@ class DashboardSummaryView(APIView):
         # ---------------------------------------------------------------------
         # 4. Insurance Company-Wise Premium Collection (The requested graph)
         # ---------------------------------------------------------------------
+        company_records = InsuranceRecord.objects.filter(insurance_company_id=OuterRef("pk"))
+        company_payments = Payment.objects.filter(
+            insurance_record__insurance_company_id=OuterRef("pk"),
+            insurance_record__deleted_at__isnull=True,
+        )
         if not is_all_time and start_date and end_date:
-            rec_filter = Q(insurance_records__entry_date__gte=start_date, insurance_records__entry_date__lte=end_date)
-            companies = (
-                InsuranceCompany.objects.filter(is_active=True)
-                .annotate(
-                    policy_count=Count("insurance_records", filter=rec_filter, distinct=True),
-                    total_premium_sum=Coalesce(
-                        Sum("insurance_records__total_premium", filter=rec_filter),
-                        Decimal("0.00"),
-                        output_field=DecimalField(),
-                    ),
-                    total_discount_sum=Coalesce(
-                        Sum("insurance_records__discount", filter=rec_filter),
-                        Decimal("0.00"),
-                        output_field=DecimalField(),
-                    ),
-                    collected_sum=Coalesce(
-                        Sum("insurance_records__payments__amount", filter=rec_filter),
-                        Decimal("0.00"),
-                        output_field=DecimalField(),
-                    ),
-                )
-                .order_by("-total_premium_sum", "name")
+            company_records = company_records.filter(entry_date__range=(start_date, end_date))
+            company_payments = company_payments.filter(
+                insurance_record__entry_date__range=(start_date, end_date)
             )
             context_premium = period_premium if period_premium > 0 else 1.0
         else:
-            companies = (
-                InsuranceCompany.objects.filter(is_active=True)
-                .annotate(
-                    policy_count=Count("insurance_records", distinct=True),
-                    total_premium_sum=Coalesce(
-                        Sum("insurance_records__total_premium"),
-                        Decimal("0.00"),
-                        output_field=DecimalField(),
-                    ),
-                    total_discount_sum=Coalesce(
-                        Sum("insurance_records__discount"),
-                        Decimal("0.00"),
-                        output_field=DecimalField(),
-                    ),
-                    collected_sum=Coalesce(
-                        Sum("insurance_records__payments__amount"),
-                        Decimal("0.00"),
-                        output_field=DecimalField(),
-                    ),
-                )
-                .order_by("-total_premium_sum", "name")
-            )
             context_premium = float(all_premium) if all_premium > 0 else 1.0
+
+        def policy_total(expression, output_field):
+            totals = company_records.order_by().values("insurance_company_id").annotate(
+                total=expression
+            ).values("total")
+            return Coalesce(Subquery(totals, output_field=output_field), 0, output_field=output_field)
+
+        payment_totals = company_payments.order_by().values(
+            "insurance_record__insurance_company_id"
+        ).annotate(total=Sum("amount")).values("total")
+        companies = InsuranceCompany.objects.filter(is_active=True).annotate(
+            policy_count=policy_total(Count("pk"), IntegerField()),
+            total_premium_sum=policy_total(Sum("total_premium"), DecimalField()),
+            total_discount_sum=policy_total(Sum("discount"), DecimalField()),
+            collected_sum=Coalesce(
+                Subquery(payment_totals, output_field=DecimalField()),
+                Decimal("0.00"), output_field=DecimalField(),
+            ),
+        ).order_by("-total_premium_sum", "name")
 
         company_wise_summary = []
         for c in companies:

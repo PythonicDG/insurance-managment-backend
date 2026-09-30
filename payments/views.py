@@ -140,14 +140,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
-    def perform_destroy(self, instance):
-        record = instance.insurance_record
-        p_disc = instance.discount or Decimal("0.00")
-        super().perform_destroy(instance)
-        if p_disc > Decimal("0.00") and record:
-            record.discount = max(Decimal("0.00"), (record.discount or Decimal("0.00")) - p_disc)
-            record.save(update_fields=["discount", "updated_at"])
-
     @action(detail=False, methods=["get"], url_path="history")
     def history(self, request):
         """
@@ -217,7 +209,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             )
             .annotate(
                 annotated_paid=Coalesce(
-                    Sum("payments__amount"),
+                    Sum("payments__amount", filter=Q(payments__deleted_at__isnull=True)),
                     Decimal("0.00"),
                     output_field=DecimalField(max_digits=12, decimal_places=2),
                 )

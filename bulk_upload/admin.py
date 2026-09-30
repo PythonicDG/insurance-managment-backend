@@ -1,3 +1,4 @@
+from config.admin import SoftDeleteAdmin
 from django.contrib import admin
 from django.forms.models import BaseInlineFormSet
 
@@ -35,7 +36,7 @@ class UploadColumnInline(admin.TabularInline):
 
 
 @admin.register(UploadTemplate)
-class UploadTemplateAdmin(admin.ModelAdmin):
+class UploadTemplateAdmin(SoftDeleteAdmin):
     list_display = ["name", "target", "is_active", "updated_at"]
     list_filter = ["target", "is_active"]
     search_fields = ["name"]
@@ -47,7 +48,7 @@ class UploadTemplateAdmin(admin.ModelAdmin):
 
 
 @admin.register(UploadReceipt)
-class UploadReceiptAdmin(admin.ModelAdmin):
+class UploadReceiptAdmin(SoftDeleteAdmin):
     list_display = ["template", "user", "created_count", "skipped_count", "created_at"]
     readonly_fields = ["template", "user", "created_count", "skipped_count", "created_at", "token_hash"]
 

@@ -1,10 +1,11 @@
+from config.soft_delete import SoftDeleteModel
 import os
 import re
 from django.conf import settings
 from django.db import models
 
 
-class WhatsAppConfig(models.Model):
+class WhatsAppConfig(SoftDeleteModel):
     """
     Configuration settings for Meta WhatsApp Cloud API.
     Can be edited via Web UI or populated from environment variables.
@@ -89,6 +90,8 @@ class WhatsAppConfig(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         verbose_name = "WhatsApp Configuration"
         verbose_name_plural = "WhatsApp Configuration"
 
@@ -138,7 +141,7 @@ class WhatsAppConfig(models.Model):
         return config
 
 
-class WhatsAppMessageLog(models.Model):
+class WhatsAppMessageLog(SoftDeleteModel):
     """
     Audit log for all outgoing and incoming WhatsApp messages, tracking delivery status,
     parameters sent, response IDs, and errors.
@@ -197,6 +200,8 @@ class WhatsAppMessageLog(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["-created_at"]
         verbose_name = "WhatsApp Message Log"
         verbose_name_plural = "WhatsApp Message Logs"

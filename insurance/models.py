@@ -1,3 +1,4 @@
+from config.soft_delete import SoftDeleteModel
 from decimal import Decimal
 import os
 from django.core.exceptions import ValidationError
@@ -6,13 +7,15 @@ from django.db import transaction
 from django.utils import timezone
 
 
-class InsuranceCompany(models.Model):
+class InsuranceCompany(SoftDeleteModel):
     name = models.CharField(max_length=255, unique=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["name"]
         verbose_name = "Insurance Company"
         verbose_name_plural = "Insurance Companies"
@@ -21,7 +24,7 @@ class InsuranceCompany(models.Model):
         return self.name
 
 
-class InsuranceRecord(models.Model):
+class InsuranceRecord(SoftDeleteModel):
     customer = models.ForeignKey(
         "customers.Customer",
         on_delete=models.CASCADE,
@@ -69,13 +72,15 @@ class InsuranceRecord(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["-entry_date", "-created_at"]
         verbose_name = "Insurance Record"
         verbose_name_plural = "Insurance Records"
         constraints = [
             models.UniqueConstraint(
                 fields=["vehicle"],
-                condition=models.Q(is_active=True),
+                condition=models.Q(is_active=True, deleted_at__isnull=True),
                 name="unique_active_insurance_per_vehicle",
             )
         ]
@@ -87,7 +92,7 @@ class InsuranceRecord(models.Model):
             if not self.policy_number:
                 raise ValidationError({"policy_number": "Policy number cannot be empty."})
 
-            qs = InsuranceRecord.objects.filter(policy_number__iexact=self.policy_number)
+            qs = InsuranceRecord.all_objects.filter(policy_number__iexact=self.policy_number)
             if self.pk:
                 qs = qs.exclude(pk=self.pk)
             if qs.exists():
@@ -274,7 +279,7 @@ def insurance_document_upload_path(instance, filename):
     return f"insurance_documents/record_{record_id}/{filename}"
 
 
-class InsuranceDocument(models.Model):
+class InsuranceDocument(SoftDeleteModel):
     record = models.ForeignKey(
         InsuranceRecord,
         on_delete=models.CASCADE,
@@ -286,6 +291,8 @@ class InsuranceDocument(models.Model):
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["-uploaded_at"]
         verbose_name = "Insurance Document"
         verbose_name_plural = "Insurance Documents"
@@ -303,14 +310,6 @@ class InsuranceDocument(models.Model):
                 pass
         super().save(*args, **kwargs)
 
-    def delete(self, *args, **kwargs):
-        if self.file:
-            try:
-                if os.path.isfile(self.file.path):
-                    os.remove(self.file.path)
-            except Exception:
-                pass
-        super().delete(*args, **kwargs)
 
 
 # Re-export Payment for convenient import

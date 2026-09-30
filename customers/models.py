@@ -1,8 +1,9 @@
+from config.soft_delete import SoftDeleteModel
 import re
 from django.db import models
 
 
-class Customer(models.Model):
+class Customer(SoftDeleteModel):
     name = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=20, db_index=True)
     alternative_mobile_number = models.CharField(
@@ -14,6 +15,8 @@ class Customer(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
         ordering = ["-created_at"]
         verbose_name = "Customer"
         verbose_name_plural = "Customers"

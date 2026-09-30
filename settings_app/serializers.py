@@ -1,8 +1,9 @@
+from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
 from .models import BusinessSettings
 
 
-class BusinessSettingsSerializer(serializers.ModelSerializer):
+class BusinessSettingsSerializer(SoftDeleteModelSerializer):
     logo_url = serializers.SerializerMethodField()
     is_export_pin_set = serializers.SerializerMethodField()
 

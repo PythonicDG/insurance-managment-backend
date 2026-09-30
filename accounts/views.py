@@ -72,9 +72,9 @@ class LoginView(APIView):
             Token.objects.filter(user=user).delete()
             token = Token.objects.create(user=user)
 
-            UserSessionActivity.objects.update_or_create(
+            UserSessionActivity.all_objects.update_or_create(
                 user=user,
-                defaults={"last_activity": timezone.now()},
+                defaults={"last_activity": timezone.now(), "deleted_at": None, "deletion_batch": None},
             )
 
         raw_include = request.data.get("include_token", None)
@@ -132,7 +132,7 @@ class PingSessionView(APIView):
 
     def post(self, request):
         now = timezone.now()
-        UserSessionActivity.objects.update_or_create(
+        UserSessionActivity.all_objects.update_or_create(
             user=request.user,
             defaults={"last_activity": now},
         )

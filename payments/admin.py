@@ -1,9 +1,10 @@
+from config.admin import SoftDeleteAdmin
 from django.contrib import admin
 from .models import Payment
 
 
 @admin.register(Payment)
-class PaymentAdmin(admin.ModelAdmin):
+class PaymentAdmin(SoftDeleteAdmin):
     list_display = (
         "id",
         "insurance_record",

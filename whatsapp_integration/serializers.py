@@ -1,8 +1,9 @@
+from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
 from .models import WhatsAppConfig, WhatsAppMessageLog
 
 
-class WhatsAppConfigSerializer(serializers.ModelSerializer):
+class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
     has_access_token = serializers.SerializerMethodField()
     masked_token = serializers.SerializerMethodField()
 
@@ -52,7 +53,7 @@ class WhatsAppConfigSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-class WhatsAppMessageLogSerializer(serializers.ModelSerializer):
+class WhatsAppMessageLogSerializer(SoftDeleteModelSerializer):
     customer_name = serializers.CharField(source="customer.name", read_only=True, default="")
     policy_number = serializers.CharField(source="insurance_record.policy_number", read_only=True, default="")
     vehicle_number = serializers.CharField(source="insurance_record.vehicle.vehicle_number", read_only=True, default="")
