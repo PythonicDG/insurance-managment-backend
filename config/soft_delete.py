@@ -7,9 +7,52 @@ from django.core.exceptions import ValidationError
 from django.db import models, router, transaction
 from django.db.models.deletion import CASCADE
 from django.utils import timezone
+from auditlog.context import audit_operation
 
 
 class SoftDeleteQuerySet(models.QuerySet):
+    @audit_operation
+    def update(self, **kwargs):
+        from auditlog.services import record_change, snapshot, tracked
+        if not tracked(self.model):
+            return super().update(**kwargs)
+        if {self.model._meta.pk.name, self.model._meta.pk.attname} & kwargs.keys():
+            raise ValueError("Primary keys cannot be changed by audited queryset updates.")
+        with transaction.atomic(using=self.db):
+            before = {row.pk: snapshot(row) for row in self.select_for_update()}
+            # Restrict the write to captured rows: concurrent matching inserts
+            # must not be changed without a corresponding before snapshot.
+            count = models.QuerySet.update(self.filter(pk__in=before), **kwargs)
+            # The update may change fields used by the original filter.
+            for row in self.model.all_objects.using(self.db).filter(pk__in=before):
+                record_change(row, before[row.pk], snapshot(row), self.db)
+            return count
+
+    @audit_operation
+    def bulk_create(self, objs, batch_size=None, ignore_conflicts=False,
+                    update_conflicts=False, update_fields=None, unique_fields=None):
+        from auditlog.services import record_change, snapshot, tracked
+        kwargs = dict(batch_size=batch_size, ignore_conflicts=ignore_conflicts,
+                      update_conflicts=update_conflicts, update_fields=update_fields,
+                      unique_fields=unique_fields)
+        if not tracked(self.model):
+            return super().bulk_create(objs, **kwargs)
+        if ignore_conflicts or update_conflicts:
+            raise ValueError("Audited bulk inserts cannot ignore or overwrite conflicts; use update_or_create.")
+        with transaction.atomic(using=self.db):
+            rows = super().bulk_create(objs, **kwargs)
+            for row in rows:
+                if row.pk is None:
+                    raise ValueError("This database cannot return IDs for audited bulk inserts.")
+                record_change(row, None, snapshot(row), self.db)
+            return rows
+
+    @audit_operation
+    def bulk_update(self, objs, fields, batch_size=None):
+        # Django implements this via our audited queryset.update(), per batch.
+        return super().bulk_update(objs, fields, batch_size=batch_size)
+
+    @audit_operation
     def delete(self):
         if self.query.is_sliced:
             raise TypeError("Cannot delete a sliced queryset.")
@@ -76,6 +119,23 @@ class SoftDeleteModel(models.Model):
         default_manager_name = "objects"
         base_manager_name = "all_objects"
 
+    @audit_operation
+    def save(self, *args, **kwargs):
+        from auditlog.services import record_change, snapshot, tracked
+        if not tracked(type(self)):
+            return super().save(*args, **kwargs)
+        using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+        with transaction.atomic(using=using):
+            previous = None
+            if self.pk is not None:
+                previous = type(self).all_objects.using(using).select_for_update().filter(pk=self.pk).first()
+            before = snapshot(previous) if previous is not None else None
+            result = super().save(*args, **kwargs)
+            # Read persisted values so update_fields/deferred fields are accurate.
+            persisted = type(self).all_objects.using(using).get(pk=self.pk)
+            record_change(persisted, before, snapshot(persisted), using)
+            return result
+
     def delete(self, using=None, keep_parents=False):
         if self.pk is None:
             raise ValueError("Cannot delete an unsaved record.")
@@ -84,6 +144,7 @@ class SoftDeleteModel(models.Model):
         self.refresh_from_db(using=using)
         return result
 
+    @audit_operation
     def restore(self, using=None):
         """Restore this deletion batch atomically, without reviving earlier deletes."""
         using = using or router.db_for_write(type(self), instance=self)

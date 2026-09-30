@@ -9,6 +9,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.authtoken.models import Token
 
 from .models import UserSessionActivity
+from auditlog.models import ActivityLog
+from auditlog.services import record_event
 from .serializers import (
     LoginSerializer,
     UserProfileSerializer,
@@ -71,6 +73,7 @@ class LoginView(APIView):
             user = User.objects.select_for_update().get(pk=authenticated_user.pk)
             Token.objects.filter(user=user).delete()
             token = Token.objects.create(user=user)
+            record_event(ActivityLog.Action.LOGIN, user, actor=user)
 
             UserSessionActivity.all_objects.update_or_create(
                 user=user,
@@ -103,9 +106,11 @@ class LoginView(APIView):
 class LogoutView(APIView):
     permission_classes = [AllowAny]
 
+    @transaction.atomic
     def post(self, request):
 
         if request.user and request.user.is_authenticated:
+            record_event(ActivityLog.Action.LOGOUT, request.user, actor=request.user)
             try:
                 request.user.auth_token.delete()
             except (Token.DoesNotExist, AttributeError):
@@ -160,6 +165,7 @@ class ProfileView(APIView):
 class ChangePasswordView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request):
 
         serializer = ChangePasswordSerializer(
@@ -174,6 +180,7 @@ class ChangePasswordView(APIView):
         )
 
         request.user.save()
+        record_event(ActivityLog.Action.PASSWORD_CHANGE, request.user, actor=request.user)
 
         try:
             request.user.auth_token.delete()

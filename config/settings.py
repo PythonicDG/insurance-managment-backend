@@ -42,7 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
-    # Third party apps 
+    # Third party apps
     'rest_framework',
     'rest_framework.authtoken',
 
@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "settings_app",
     "whatsapp_integration",
     "bulk_upload",
+    "auditlog.apps.AuditlogConfig",
 ]
 
 MIDDLEWARE = [
@@ -65,6 +66,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'auditlog.middleware.AuditContextMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -149,6 +151,9 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Only these reverse proxies may supply the client IP for activity logs.
+AUDIT_TRUSTED_PROXY_IPS = [ip.strip() for ip in os.getenv("AUDIT_TRUSTED_PROXY_IPS", "").split(",") if ip.strip()]
+
 
 # Django REST Framework configuration
 REST_FRAMEWORK = {
@@ -226,4 +231,4 @@ DEFAULT_FROM_EMAIL = os.getenv(
 )
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", 15))
-ADMIN_NOTIFICATION_EMAIL = os.getenv("ADMIN_NOTIFICATION_EMAIL", "")
+ADMIN_NOTIFICATION_EMAIL = os.getenv("ADMIN_NOTIFICATION_EMAIL", "")

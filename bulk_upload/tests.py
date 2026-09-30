@@ -20,6 +20,7 @@ from .services import convert
 
 class BulkUploadTests(APITestCase):
     def setUp(self):
+        self.upload_bytes = {}
         self.user = User.objects.create_user(username="bulk-agent", password="test-pass")
         self.client.force_authenticate(self.user)
         self.template = UploadTemplate.objects.get(name="Standard Customers")
@@ -27,13 +28,18 @@ class BulkUploadTests(APITestCase):
         self.company = InsuranceCompany.objects.create(name="Example Insurance")
 
     def file(self, headers, rows):
-        workbook = Workbook()
-        workbook.active.append(headers)
-        for row in rows:
-            workbook.active.append(row)
-        stream = io.BytesIO()
-        workbook.save(stream)
-        stream.seek(0)
+        # Preview/import bind to exact bytes. Regenerating XLSX can change ZIP
+        # timestamps even with identical cells, causing timing-dependent failures.
+        key = (tuple(headers), tuple(tuple(row) for row in rows))
+        if key not in self.upload_bytes:
+            workbook = Workbook()
+            workbook.active.append(headers)
+            for row in rows:
+                workbook.active.append(row)
+            stream = io.BytesIO()
+            workbook.save(stream)
+            self.upload_bytes[key] = stream.getvalue()
+        stream = io.BytesIO(self.upload_bytes[key])
         stream.name = "clients.xlsx"
         return stream
 
