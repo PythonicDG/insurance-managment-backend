@@ -13,6 +13,7 @@ urlpatterns = [
     path("api/dashboard/", include("dashboard.urls")),
     path("api/settings/", include("settings_app.urls")),
     path("api/whatsapp/", include("whatsapp_integration.urls")),
+    path("api/bulk-upload/", include("bulk_upload.urls")),
 ]
 
 if settings.DEBUG:

@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "dashboard",
     "settings_app",
     "whatsapp_integration",
+    "bulk_upload",
 ]
 
 MIDDLEWARE = [
