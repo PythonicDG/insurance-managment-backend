@@ -9,12 +9,16 @@ from .views import (
     WhatsAppSendPolicyView,
     WhatsAppTestMessageView,
     WhatsAppWebhookView,
+    WhatsAppRenewalView,
+    WhatsAppRenewalTestView,
 )
 
 router = DefaultRouter()
 router.register(r"logs", WhatsAppMessageLogViewSet, basename="whatsapp-logs")
 
 urlpatterns = [
+    path("renewals/send-test/", WhatsAppRenewalTestView.as_view(), name="whatsapp-renewal-test"),
+    path("records/<int:record_id>/renewal/", WhatsAppRenewalView.as_view(), name="whatsapp-renewal"),
     path("config/", WhatsAppConfigView.as_view(), name="whatsapp-config"),
     path("send-test/", WhatsAppTestMessageView.as_view(), name="whatsapp-send-test"),
     path("webhook/", WhatsAppWebhookView.as_view(), name="whatsapp-webhook"),

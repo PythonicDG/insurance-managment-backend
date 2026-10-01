@@ -1,5 +1,11 @@
 import json
 import logging
+import os
+import hmac
+import hashlib
+from datetime import timedelta
+from django.db import transaction
+from django.utils import timezone
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
@@ -13,7 +19,8 @@ from rest_framework.views import APIView
 
 from insurance.models import InsuranceRecord
 from payments.models import Payment
-from .models import WhatsAppConfig, WhatsAppMessageLog
+from .models import WhatsAppConfig, WhatsAppMessageLog, RenewalReminderJob, RenewalReminderOptOut
+from .renewals import STAGES, enqueue
 from .serializers import (
     WhatsAppConfigSerializer,
     WhatsAppMessageLogSerializer,
@@ -238,6 +245,8 @@ class WhatsAppResendLogView(APIView):
 
     def post(self, request, log_id):
         original_log = get_object_or_404(WhatsAppMessageLog, pk=log_id)
+        if original_log.message_type == "RENEWAL_REMINDER":
+            return Response({"error": "Renewal reminders cannot be resent from logs. Use the policy renewal button; all safety checks apply."}, status=400)
         config = WhatsAppConfig.get_config()
 
         if original_log.template_name:
@@ -281,6 +290,7 @@ class WhatsAppWebhookView(APIView):
     - POST /api/whatsapp/webhook/ -> Real-time status updates (sent, delivered, read, failed)
     """
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def get(self, request):
         mode = request.GET.get("hub.mode")
@@ -300,6 +310,11 @@ class WhatsAppWebhookView(APIView):
         return HttpResponse("Verification token mismatch", status=403)
 
     def post(self, request):
+        app_secret = os.getenv("WHATSAPP_APP_SECRET", "")
+        if app_secret:
+            expected = "sha256=" + hmac.new(app_secret.encode(), request.body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, request.headers.get("X-Hub-Signature-256", "")):
+                return HttpResponse("Invalid webhook signature", status=403)
         try:
             payload = json.loads(request.body.decode("utf-8"))
         except Exception:
@@ -310,6 +325,14 @@ class WhatsAppWebhookView(APIView):
             changes = entry.get("changes", [])
             for change in changes:
                 value = change.get("value", {})
+                for incoming in value.get("messages", []):
+                    text = incoming.get("text", {}).get("body", "").strip().upper()
+                    if text in ("STOP", "UNSUBSCRIBE"):
+                        phone = normalize_phone_number(incoming.get("from", ""))
+                        if phone:
+                            opt_out, _ = RenewalReminderOptOut.all_objects.get_or_create(recipient_phone=phone)
+                            if opt_out.deleted_at:
+                                opt_out.restore()
                 statuses = value.get("statuses", [])
 
                 for item in statuses:
@@ -319,11 +342,17 @@ class WhatsAppWebhookView(APIView):
                     if not wamid or not meta_status:
                         continue
 
-                    logs = WhatsAppMessageLog.objects.filter(wamid=wamid)
-                    if logs.exists():
-                        log = logs.first()
+                    with transaction.atomic():
+                        log = WhatsAppMessageLog.objects.select_for_update().filter(wamid=wamid).first()
+                        if not log:
+                            continue
+                        event = {"status": meta_status, "timestamp": item.get("timestamp"), "errors": item.get("errors", [])}
+                        if event not in log.delivery_events:
+                            log.delivery_events = [*log.delivery_events, event]
+                        ranks = {"queued": 0, "sent": 1, "failed": 2, "delivered": 3, "read": 4}
                         if meta_status in ("sent", "delivered", "read", "failed"):
-                            log.status = meta_status
+                            if ranks.get(meta_status, 0) > ranks.get(log.status, 0):
+                                log.status = meta_status
 
                         if meta_status == "failed":
                             errors = item.get("errors", [])
@@ -334,3 +363,40 @@ class WhatsAppWebhookView(APIView):
                         logger.info(f"Updated WhatsApp log wamid {wamid} status to {meta_status}")
 
         return HttpResponse("EVENT_RECEIVED", status=200)
+
+
+class WhatsAppRenewalView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, record_id):
+        record = get_object_or_404(InsuranceRecord.objects.select_related("customer", "vehicle"), pk=record_id)
+        config = WhatsAppConfig.get_config()
+        if not config.is_enabled:
+            return Response({"error": "WhatsApp sending is disabled."}, status=400)
+        try:
+            job, created = enqueue(record)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
+        if job.stage not in config.renewal_stages:
+            return Response({"error": "This reminder stage is disabled."}, status=400)
+        return Response({"success": True, "job_id": job.pk, "status": job.status,
+                         "message": "Renewal reminder queued for the worker." if created else
+                         f"This stage already exists ({job.status}); no duplicate queued."}, status=202)
+
+
+class WhatsAppRenewalTestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        config = WhatsAppConfig.get_config()
+        stage = request.data.get("stage", 30)
+        if type(stage) is not int or stage not in STAGES:
+            return Response({"error": "Choose stage 30, 15, 7, 2 or 0."}, status=400)
+        phone = normalize_phone_number(config.test_phone_number, config.default_country_code)
+        if not config.is_enabled or not phone or not 8 <= len(phone) <= 15:
+            return Response({"error": "Enable WhatsApp and save a valid admin test phone first."}, status=400)
+        # Test destination comes exclusively from saved config, including in live mode.
+        job = RenewalReminderJob.objects.create(stage=stage, is_test=True, source="test",
+               recipient_phone=phone, expiry_date=timezone.localdate() + timedelta(days=stage))
+        return Response({"success": True, "job_id": job.pk, "status": "queued",
+                         "message": "Admin test reminder queued. Business hours, holidays and safety cap apply."}, status=202)

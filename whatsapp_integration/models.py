@@ -1,8 +1,13 @@
 from config.soft_delete import SoftDeleteModel
 import os
 import re
+from datetime import time
 from django.conf import settings
 from django.db import models
+
+
+def default_renewal_stages():
+    return [30, 15, 7, 2, 0]
 
 
 class WhatsAppConfig(SoftDeleteModel):
@@ -86,6 +91,16 @@ class WhatsAppConfig(SoftDeleteModel):
         help_text="Automatically send WhatsApp message when a payment is collected."
     )
 
+    renewal_enabled = models.BooleanField(default=False)
+    renewal_send_time = models.TimeField(default=time(10, 30))
+    renewal_skip_sundays = models.BooleanField(default=True)
+    renewal_skip_holidays = models.BooleanField(default=True)
+    renewal_holidays = models.JSONField(default=list, blank=True)
+    renewal_stages = models.JSONField(default=default_renewal_stages, blank=True)
+    renewal_daily_cap = models.PositiveIntegerField(default=100)
+    renewal_language = models.CharField(max_length=10, default="en")
+    renewal_last_attempt_at = models.DateTimeField(null=True, blank=True, editable=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -151,6 +166,7 @@ class WhatsAppMessageLog(SoftDeleteModel):
         ("PAYMENT_RECEIPT", "Payment Receipt"),
         ("TEST", "Test Message"),
         ("CUSTOM", "Custom Message"),
+        ("RENEWAL_REMINDER", "Renewal Reminder"),
     ]
 
     STATUS_CHOICES = [
@@ -159,6 +175,7 @@ class WhatsAppMessageLog(SoftDeleteModel):
         ("delivered", "Delivered to Phone"),
         ("read", "Read by Customer"),
         ("failed", "Failed"),
+        ("skipped", "Skipped"),
     ]
 
     customer = models.ForeignKey(
@@ -193,6 +210,7 @@ class WhatsAppMessageLog(SoftDeleteModel):
     
     request_payload = models.JSONField(null=True, blank=True)
     response_payload = models.JSONField(null=True, blank=True)
+    delivery_events = models.JSONField(default=list, blank=True)
     error_message = models.TextField(blank=True, default="")
     is_test = models.BooleanField(default=False)
 
@@ -208,3 +226,35 @@ class WhatsAppMessageLog(SoftDeleteModel):
 
     def __str__(self):
         return f"{self.message_type} -> {self.recipient_phone} ({self.status}) [{self.created_at.strftime('%Y-%m-%d %H:%M')}]"
+
+
+class RenewalReminderJob(SoftDeleteModel):
+    """Persistent outbox. A committed attempt is never automatically retried."""
+    record = models.ForeignKey("insurance.InsuranceRecord", null=True, blank=True,
+                               on_delete=models.SET_NULL, related_name="renewal_reminders")
+    expiry_date = models.DateField()
+    stage = models.PositiveSmallIntegerField()
+    source = models.CharField(max_length=12, default="automatic")
+    is_test = models.BooleanField(default=False)
+    status = models.CharField(max_length=12, default="queued", db_index=True)
+    reason = models.TextField(blank=True)
+    recipient_phone = models.CharField(max_length=25, blank=True)
+    attempted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    log = models.OneToOneField(WhatsAppMessageLog, null=True, blank=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"
+        constraints = [models.UniqueConstraint(
+            fields=["record", "expiry_date", "stage"], condition=models.Q(is_test=False),
+            name="unique_policy_renewal_stage")]
+
+
+class RenewalReminderOptOut(SoftDeleteModel):
+    recipient_phone = models.CharField(max_length=25, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        default_manager_name = "objects"
+        base_manager_name = "all_objects"

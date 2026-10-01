@@ -1,5 +1,6 @@
 from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
+from datetime import date, time
 from .models import WhatsAppConfig, WhatsAppMessageLog
 
 
@@ -28,6 +29,9 @@ class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
             "webhook_verify_token",
             "auto_send_policy_creation",
             "auto_send_payment_receipt",
+            "renewal_enabled", "renewal_send_time", "renewal_skip_sundays",
+            "renewal_skip_holidays", "renewal_holidays", "renewal_stages",
+            "renewal_daily_cap", "renewal_language",
             "updated_at",
         ]
         extra_kwargs = {
@@ -36,6 +40,29 @@ class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
 
     def get_has_access_token(self, obj) -> bool:
         return bool(obj.access_token and obj.access_token.strip())
+
+    def validate_renewal_send_time(self, value):
+        if not (time(10) <= value < time(12) or time(16, 30) <= value < time(18)):
+            raise serializers.ValidationError("Choose 10:00–11:59 or 16:30–17:59 (server business timezone).")
+        return value
+
+    def validate_renewal_stages(self, value):
+        if not isinstance(value, list) or any(type(v) is not int or v not in [30, 15, 7, 2, 0] for v in value):
+            raise serializers.ValidationError("Stages must be a list containing only 30, 15, 7, 2, 0.")
+        return sorted(set(value), reverse=True)
+
+    def validate_renewal_holidays(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Use a list of YYYY-MM-DD holiday dates.")
+        try:
+            return sorted(set(date.fromisoformat(v).isoformat() for v in value))
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("Use YYYY-MM-DD holiday dates.")
+
+    def validate_renewal_daily_cap(self, value):
+        if not 1 <= value <= 1000:
+            raise serializers.ValidationError("Daily cap must be between 1 and 1000.")
+        return value
 
     def get_masked_token(self, obj) -> str:
         tok = (obj.access_token or "").strip()
@@ -71,6 +98,7 @@ class WhatsAppMessageLogSerializer(SoftDeleteModelSerializer):
             "wamid",
             "request_payload",
             "response_payload",
+            "delivery_events",
             "error_message",
             "is_test",
             "customer",

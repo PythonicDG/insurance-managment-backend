@@ -1,6 +1,6 @@
 from config.admin import SoftDeleteAdmin
 from django.contrib import admin
-from .models import WhatsAppConfig, WhatsAppMessageLog
+from .models import WhatsAppConfig, WhatsAppMessageLog, RenewalReminderJob, RenewalReminderOptOut
 
 
 @admin.register(WhatsAppConfig)
@@ -60,6 +60,8 @@ class WhatsAppConfigAdmin(SoftDeleteAdmin):
                 )
             },
         ),
+        ("Renewal reminders", {"fields": ("renewal_enabled", "renewal_send_time", "renewal_skip_sundays",
+            "renewal_skip_holidays", "renewal_holidays", "renewal_stages", "renewal_daily_cap", "renewal_language")}),
     )
 
 
@@ -87,4 +89,24 @@ class WhatsAppMessageLogAdmin(SoftDeleteAdmin):
         "updated_at",
         "request_payload",
         "response_payload",
+        "delivery_events",
     )
+
+
+@admin.register(RenewalReminderJob)
+class RenewalReminderJobAdmin(admin.ModelAdmin):
+    list_display = ("id", "record", "stage", "source", "status", "recipient_phone", "attempted_at")
+    list_filter = ("status", "stage", "source", "is_test")
+    readonly_fields = tuple(field.name for field in RenewalReminderJob._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(RenewalReminderOptOut)
+class RenewalReminderOptOutAdmin(SoftDeleteAdmin):
+    list_display = ("recipient_phone", "created_at")
+    readonly_fields = ("created_at",)
