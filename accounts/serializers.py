@@ -55,24 +55,19 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
 class ChangePasswordSerializer(serializers.Serializer):
-    old_password = serializers.CharField(
-        write_only=True
-    )
+    verification_token = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     new_password = serializers.CharField(
         write_only=True,
-        min_length=8
+        min_length=8,
+        trim_whitespace=False
     )
 
-    def validate_old_password(self, value):
-        user = self.context["request"].user
-
-        if not user.check_password(value):
-            raise serializers.ValidationError(
-                "Old password is incorrect."
-            )
-
-        return value
+    def validate(self, attrs):
+        if attrs["new_password"] != attrs["confirm_password"]:
+            raise serializers.ValidationError({"message": "New password and confirmation do not match."})
+        return attrs
 
     def validate_new_password(self, value):
         from django.contrib.auth.password_validation import validate_password

@@ -26,7 +26,18 @@ Most routes require authentication. `POST /api/auth/login/` accepts JSON `userna
 the server sets the `insure_token` HttpOnly cookie. Browser requests include credentials.
 `GET /api/auth/profile/`, `POST /api/auth/logout/`, `POST /api/auth/ping/` and
 `POST /api/auth/change-password/` provide account operations. Password-change fields are
-`old_password` and `new_password`. The API also accepts `Authorization: Token <key>`.
+`verification_token`, `new_password`, and `confirm_password`. Obtain the verification
+token by sending an email OTP with `POST /api/auth/change/request-otp/` and verifying
+it with `POST /api/auth/change/verify-otp/` (purpose `password`). Tokens are single-use
+and expire after 10 minutes. The API also accepts `Authorization: Token <key>`.
+
+Settings contact changes use the same OTP flow with purpose `account_email`, `email`
+(agency email), or `phone` (agency phone), followed by `POST /api/auth/change/contact/`
+with `purpose`, `verification_token`, and `new_value`. Password/account email codes
+go to the saved account email, falling back to the saved agency email. Agency contact
+codes go to the saved agency email, falling back to the account email. Regular settings
+updates cannot change contacts once a verification email exists. Initial agency email
+setup is allowed only if neither saved email exists.
 Authentication uses DRF tokens.
 
 Core resources include `/api/customers/`, `/api/vehicles/`, `/api/insurance/companies/`,

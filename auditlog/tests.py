@@ -183,8 +183,18 @@ class ActivityAuditTests(TestCase):
         self.assertIsNone(current_request.get())
 
     def test_password_change_audits_without_password_and_revokes_token(self):
+        from accounts.models import AccountChangeChallenge
+        from django.contrib.auth.hashers import make_password
+        self.user.email = "operator@example.com"
+        self.user.save(update_fields=["email"])
+        AccountChangeChallenge.objects.create(
+            user=self.user, purpose="password", recipient=self.user.email,
+            otp_hash="", token_hash=make_password("verified-test-token"),
+            verified=True, expires_at=timezone.now() + timedelta(minutes=10),
+        )
         response = self.client.post("/api/auth/change-password/", {
-            "old_password": "StrongPassword@123", "new_password": "NewStrongPassword@456"
+            "verification_token": "verified-test-token", "new_password": "NewStrongPassword@456",
+            "confirm_password": "NewStrongPassword@456",
         }, format="json")
         self.assertEqual(response.status_code, 200, response.data)
         entry = ActivityLog.objects.get(action="password_change")

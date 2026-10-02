@@ -175,6 +175,10 @@ class ChangePasswordView(APIView):
 
         serializer.is_valid(raise_exception=True)
 
+        from .change_verification import consume_verification
+        User.objects.select_for_update().get(pk=request.user.pk)
+        consume_verification(request.user, "password", serializer.validated_data["verification_token"])
+
         request.user.set_password(
             serializer.validated_data["new_password"]
         )
