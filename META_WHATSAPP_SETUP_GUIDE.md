@@ -2,7 +2,6 @@
 
 This guide describes the application integration. Meta account eligibility, interface labels, billing,
 limits, token policies and template approval can change; verify them in the client-owned Meta account.
-No fixed pricing, free allowance, approval time or indefinite token validity is promised by this guide.
 Consult [Meta Cloud API documentation](https://developers.facebook.com/docs/whatsapp/cloud-api/),
 [current pricing](https://developers.facebook.com/docs/whatsapp/pricing/) and
 [Business Messaging Policy](https://business.whatsapp.com/policy) before enabling live messages.
@@ -22,11 +21,11 @@ Consult [Meta Cloud API documentation](https://developers.facebook.com/docs/what
    [WHATSAPP_RENEWAL_REMINDERS.md](WHATSAPP_RENEWAL_REMINDERS.md). Match the exact approved names/languages.
    Confirm the configured Graph API version is supported in the client's app; the code defaults to v21.0.
 6. Generate a private random webhook verification token and save it in both the application's WhatsApp
-   configuration and Meta. Do not use the old shared example token as a production secret.
+   configuration and Meta. Use a distinct token for each deployment.
 
 ## Webhook and worker
 
-Set the HTTPS callback to `https://api.example.com/api/whatsapp/webhook/` using the actual backend domain.
+Use the backend HTTPS origin followed by `/api/whatsapp/webhook/` as the callback URL.
 Subscribe to message events. The saved webhook verify token handles Meta's GET challenge;
 set `WHATSAPP_APP_SECRET` in the backend service environment for POST signature validation.
 The app secret and verify token are different values. Restart the API after environment changes.

@@ -1,50 +1,75 @@
-# Production deployment
+# Linux deployment with PM2
 
-This guide describes a Linux deployment with client-owned domains `app.example.com` and `api.example.com`.
-Replace every example value. It is a deployment procedure, not a claim that hosting has been provisioned.
-Use Python 3.11, PostgreSQL, Node.js for the separate frontend, TLS certificates and a reverse proxy.
+The server checkout is `/home/insurance/insurance-managment-backend`. The API binds to
+`127.0.0.1:8000` behind the HTTPS reverse proxy. PM2 supervises Gunicorn and, when enabled,
+the separate renewal worker.
 
-1. Provision an unprivileged service account, a dedicated PostgreSQL role/database, persistent storage,
-   TLS and firewall rules. Keep PostgreSQL and the Gunicorn port private.
-2. Check out the agreed backend release. Create `.venv` and install `requirements.lock.txt`.
-3. Copy `.env.production.example` to `.env`; set a generated secret, database credentials, actual
-   backend/frontend domains and SMTP values. Restrict `.env` permissions to the service account.
-   Keep WhatsApp disabled until the client's Meta setup is verified.
-4. Back up existing database and uploads before changing an existing deployment. Run:
+## Environment
 
-```sh
-.venv/bin/python manage.py check
-.venv/bin/python manage.py migrate --noinput
-.venv/bin/python manage.py collectstatic --noinput
-.venv/bin/python manage.py check --deploy --fail-level WARNING
-.venv/bin/python manage.py createsuperuser
-```
+Keep the server's private `.env`. Production uses `DEBUG=False`, a generated SECRET_KEY,
+the backend host in ALLOWED_HOSTS, the frontend origin in CORS_ALLOWED_ORIGINS, and matching
+CSRF_TRUSTED_ORIGINS. PostgreSQL credentials and SMTP/Meta credentials belong in private configuration.
+See [Configuration](CONFIGURATION.md) for the complete variable reference.
 
-Create the administrator only on initial setup. Generate its password privately and transfer it securely.
-Do not run seed_data.py on production. Resolve all deploy-check warnings against the real environment.
+For a new host, `.env.production.example` documents the settings. Configure HTTPS at the reverse proxy
+before enabling SECURE_SSL_REDIRECT. The proxy must preserve Host and overwrite X-Forwarded-Proto.
+Serve collected `/static/` files from `staticfiles/` and keep the API/database ports private.
 
-5. Run the API under a supervisor, with this repository as the working directory:
+## Update the checkout
+
+Back up the database and `media/` before applying a release. Activate the server's backend virtual
+environment; the checkout supports `.venv`, `venv` or the shared `/home/insurance/venv` layout.
 
 ```sh
-.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 2 --timeout 60 --access-logfile - --error-logfile -
+cd /home/insurance/insurance-managment-backend
+git pull --ff-only
+python -m pip install -r requirements.lock.txt
+python manage.py check
+python manage.py migrate --noinput
+python manage.py collectstatic --noinput
+python manage.py check --deploy --fail-level WARNING
 ```
 
-Gunicorn is for Linux, not Windows. Size worker count/timeouts for the actual host and measured workload.
-Use `deploy/insureledger-api.service.example` as a systemd starting point; replace paths/account names.
-6. Reverse proxy HTTPS `api.example.com` to 127.0.0.1:8000. Preserve Host and overwrite
-   X-Forwarded-Proto with the actual connection scheme. Only trust headers from this proxy.
-   Serve `/static/` from `staticfiles/`. Size request limits for the agreed import/document limits.
-   Enforce login rate limits at the proxy, restrict admin access and collect service logs.
-7. Uploaded insurance documents currently use file URLs rather than authorization-checked downloads.
-   Publicly serving all of `/media/` exposes files to anyone with their URLs. Before accepting a public
-   deployment with confidential documents, agree and implement an authenticated download/storage policy.
-   Run a private network deployment meanwhile if appropriate to the client's accepted use.
-8. Build/start the frontend using its deployment guide. Verify CORS and cookies with a real browser.
-   Same-site HTTPS subdomains work with host-only auth cookies and SameSite=Lax; unrelated domains require
-   separately validated cookie/CSRF design and may encounter browser third-party-cookie restrictions.
-9. If renewals are enabled, run `.venv/bin/python manage.py process_renewal_reminders --watch` as a
-   separate supervised process. Use the provided worker unit example. Verify approved templates,
-   test phone, consent process, webhook signature secret and delivery logs before live mode.
-10. Complete docs/HANDOVER.md and record exact backend/frontend commit IDs and test results.
+Create an administrator with `python manage.py createsuperuser` only during initial installation.
+Keep demo data out of the production database. Preserve existing environment files during updates.
 
-Reference: [Django deployment checklist](https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/).
+## PM2 processes
+
+`deploy/ecosystem.config.js` resolves the checkout and Python executable automatically. It defines:
+
+| Process | Command |
+| --- | --- |
+| insurance-backend | Gunicorn, two workers, loopback port 8000 |
+| insurance-renewals | process_renewal_reminders --watch |
+
+First start of the API:
+
+```sh
+pm2 start deploy/ecosystem.config.js --only insurance-backend
+pm2 save
+```
+
+After an update:
+
+```sh
+pm2 restart deploy/ecosystem.config.js --only insurance-backend --update-env
+pm2 logs insurance-backend --lines 50
+```
+
+On an existing PM2 installation, run `pm2 list` before adopting the configuration. Keep one API process
+on port 8000; reuse the current process or migrate its name during a maintenance window.
+
+Start the renewal worker separately after verifying the saved sending configuration:
+
+```sh
+pm2 start deploy/ecosystem.config.js --only insurance-renewals
+pm2 save
+```
+
+Use `pm2 restart deploy/ecosystem.config.js --only insurance-renewals --update-env` after worker updates.
+Set up PM2 boot persistence with `pm2 startup`, follow the command it prints, then run `pm2 save`.
+Run PM2 commands as the account that owns the processes.
+
+Verify administrator login, API requests and document access after restarting. Review
+[Security](../SECURITY.md) for the document-access and authentication boundaries, and
+[Operations](OPERATIONS.md) for rollback and restore.

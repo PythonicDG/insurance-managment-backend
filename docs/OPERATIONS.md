@@ -1,61 +1,59 @@
-# Operations runbook
+# Operations
 
-Assign named client owners for hosting, database, backups, credentials, incidents and releases.
-Agree retention, recovery point/time targets and support coverage before acceptance.
-Monitor API failures/latency, frontend availability, disk space, database capacity, TLS expiry,
-SMTP failures and renewal-worker/delivery logs. No monitoring service is preconfigured.
-An unauthenticated request to `/api/auth/profile/` should return 401; this checks routing/auth,
-not complete database or external-service health. There is no dedicated health endpoint.
-
-## Backup and restore
-
-Back up the database AND `media/`; source code alone cannot restore client records or attachments.
-Store encrypted, access-controlled copies outside the application host and regularly restore them in isolation.
-Database backups include Meta configuration/access tokens, users and personal data; protect them as secrets.
-Keep environment secrets separately in a client-controlled secret store. Never commit backup files.
-
-For PostgreSQL, use the client database tools and a private `.pgpass`/secret mechanism:
+## Service checks
 
 ```sh
-pg_dump --format=custom --host=DB_HOST --username=DB_USER --dbname=DB_NAME --file=/secure-backups/insureledger.dump
+pm2 list
+pm2 logs insurance-backend --lines 50
 ```
 
-For a consistent coordinated snapshot, pause writes and the renewal worker during database/media capture.
-Back up `media/` with the hosting provider's encrypted storage snapshot/backup tooling.
-For SQLite, stop writes and use SQLite's backup API (or a stopped-server copy); do not copy a live
-database and assume it is consistent. SQLite is intended for local use in this delivery.
+When the renewal worker is enabled, also inspect `pm2 logs insurance-renewals --lines 50` and the
+WhatsApp delivery logs in Settings. Monitor API errors, disk space, database capacity, certificate
+expiry and backup completion. An unauthenticated request to `/api/auth/profile/` should return 401.
 
-Restore into an EMPTY isolated PostgreSQL database, using matching release source and media snapshot:
+## Backups
 
-```sh
-pg_restore --no-owner --no-acl --host=DB_HOST --username=DB_USER --dbname=RESTORE_DB /secure-backups/insureledger.dump
-```
+Back up the database and `media/` together. Pause API writes and the renewal worker for a coordinated
+snapshot. Store encrypted copies outside the application host and test restoration periodically.
+Database backups include user records, audit history and saved Meta credentials; restrict access.
+Keep private environment credentials in the server's secret-management process.
 
-Use credentials that own/can create objects in the target database. Keep SMTP/WhatsApp disabled,
-block outbound messaging while inspecting restored saved config, and keep the worker stopped.
-Check customer/policy/payment counts, balances, renewal links, audit records and representative document downloads.
-Record actual restore duration and snapshot timestamp. Only cut over after an agreed maintenance window.
+For PostgreSQL, use `pg_dump` in custom format with the database connection configured in `.env`.
+Use a private password file or the hosting backup service rather than a password in command arguments.
+Restore with `pg_restore` into an empty isolated database using the matching source release.
 
-## Release / rollback
+For SQLite, stop writes before copying `db.sqlite3`. The SQLite backup API is also supported by
+Python's sqlite3 module. Copy the associated `media/` directory with the same snapshot.
 
-Record both repository commits. Run CI and acceptance checks before tagging a release in each repo.
-Take database/media backups, stop the worker, deploy dependencies/source, apply migrations, collect static,
-restart API/frontend, smoke test, then resume the worker. Retain the previous release artifact.
-If code alone is compatible with the current schema, revert to the previous artifact and restart services.
-Otherwise stop writes and restore the matched pre-release database/media snapshot and source version.
-Restoring discards post-backup changes; obtain the incident owner's decision. Never blindly reverse migrations.
+A restore check covers customer, vehicle, policy and payment counts; outstanding balances;
+renewal links; audit history; and representative document downloads. Keep SMTP/WhatsApp disabled
+and the worker stopped while testing restored data.
 
-## Record recovery and reminders
+## Releases and rollback
 
-Archive operations are soft deletes. Follow SOFT_DELETES.md; an operator can run
-`python manage.py restore_record customers.Customer <id>` to restore a batch after reviewing conflicts.
-Do not directly delete rows or reset audit history. Failed/interrupted renewal jobs may already have reached
-Meta: inspect provider IDs and webhook history before recovery. Do not blindly reset/retry jobs.
+Keep the backend/frontend release commits together. Before an update, take a database/media backup
+and retain the previous source or build. Stop the worker, install the committed dependencies, apply
+migrations, collect static files, restart the API/frontend and verify the main workflows.
+Resume the worker after the API checks pass.
 
-## Credential rotation
+Roll back code alone only when it is compatible with the current schema. Otherwise stop writes and
+restore the matched database/media backup and previous source release. A restore discards changes
+made after the snapshot; account for those records before cutover. Preserve applied migration history.
 
-Update hosting/CI secrets, SMTP credentials, PostgreSQL credentials and Django SECRET_KEY separately.
-Update persisted Meta credentials in Settings > WhatsApp; changing env alone may not replace them.
-Rotate the webhook verification token in both Meta and saved application settings, and supply the app secret
-in the service environment. If credentials or the database were exposed, revoke DRF auth tokens as well.
-Changing Django SECRET_KEY alone does not invalidate the database-backed API tokens.
+## Archived records and interrupted reminders
+
+Archived business records retain their deletion batch. The `restore_record` management command
+restores that batch and checks constraints; see [Soft deletion](../SOFT_DELETES.md).
+Keep audit history intact when recovering records.
+
+A failed or interrupted reminder may already have been accepted by Meta. Inspect the provider message
+ID and webhook status history before recovery. Do not reset jobs for an automatic resend.
+
+## Credentials
+
+Rotate database, SMTP and Meta credentials through private configuration. Update saved Meta settings
+in the application as well as the service environment. Change the webhook verification token in both
+Meta and application settings, and set the app secret in the backend environment.
+
+After a credential or database exposure, revoke affected API tokens and review access logs.
+Changing Django SECRET_KEY alone does not revoke database-backed API tokens.

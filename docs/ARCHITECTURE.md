@@ -27,7 +27,7 @@ the server sets the `insure_token` HttpOnly cookie. Browser requests include cre
 `GET /api/auth/profile/`, `POST /api/auth/logout/`, `POST /api/auth/ping/` and
 `POST /api/auth/change-password/` provide account operations. Password-change fields are
 `old_password` and `new_password`. The API also accepts `Authorization: Token <key>`.
-It does not use JWT despite earlier unused dependencies.
+Authentication uses DRF tokens.
 
 Core resources include `/api/customers/`, `/api/vehicles/`, `/api/insurance/companies/`,
 `/api/insurance/records/`, `/api/insurance/documents/` and `/api/payments/`.
@@ -35,7 +35,7 @@ Bulk-upload routes: `GET templates/`, `GET templates/<id>/download/`, `POST prev
 under `/api/bulk-upload/`. The public Meta webhook is `/api/whatsapp/webhook/`.
 See each app's `urls.py`, viewsets and serializers for all actions, parameters and validation.
 Frontend request methods and shared payload interfaces are in `lib/api.ts` and `lib/bulk-upload-api.ts`.
-This is an endpoint map, not a generated OpenAPI specification.
+The route definitions and serializers are the API reference for additional actions.
 
 Errors normally use DRF status codes and JSON field/detail messages. Authentication failures are 401;
 the frontend clears tab state and returns to login. Lists and special actions have their own shapes;

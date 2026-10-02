@@ -44,3 +44,9 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# Local tooling
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.codex/
