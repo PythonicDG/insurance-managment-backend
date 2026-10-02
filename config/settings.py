@@ -7,6 +7,7 @@ Production-ready configuration for Hostinger deployment.
 
 import os
 from pathlib import Path
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -16,10 +17,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv(
-    "SECRET_KEY",
-    "django-insecure-4(%&)p^4l4&_92u$#815k0ff73319v4*6(6plv534o6a756)_)"
-)
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+if not SECRET_KEY or SECRET_KEY == "replace-with-generated-secret":
+    raise ImproperlyConfigured("Set SECRET_KEY in the environment or .env. See docs/INSTALLATION.md.")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "False").strip().lower() in ("true", "1", "t", "yes")
@@ -94,6 +94,8 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # Supports PostgreSQL or SQLite via DB_ENGINE in .env
 db_engine = os.getenv("DB_ENGINE", "sqlite").strip().lower()
+if db_engine not in ("sqlite", "postgres", "postgresql"):
+    raise ImproperlyConfigured("DB_ENGINE must be sqlite or postgresql.")
 
 if db_engine in ("postgres", "postgresql"):
     DATABASES = {
@@ -180,9 +182,6 @@ DEFAULT_CORS_ORIGINS = [
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 if cors_origins_env:
     origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
-    for d_origin in DEFAULT_CORS_ORIGINS:
-        if d_origin not in origins:
-            origins.append(d_origin)
     CORS_ALLOWED_ORIGINS = origins
     CORS_ALLOW_ALL_ORIGINS = False
 else:
@@ -212,6 +211,14 @@ elif not DEBUG:
 # Trust X-Forwarded-Proto header from Nginx reverse proxy in production
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Enable HTTPS redirect/HSTS after configuring TLS at the trusted reverse proxy.
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "False").lower() in ("true", "1", "yes")
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("SECURE_HSTS_INCLUDE_SUBDOMAINS", "False").lower() in ("true", "1", "yes")
+SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "False").lower() in ("true", "1", "yes")
 
 
 # Django Email Configuration (SMTP / Notifications)

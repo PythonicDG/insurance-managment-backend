@@ -21,6 +21,8 @@ staticfiles/
 # Environment variables
 .env
 .env.*
+!.env.example
+!.env.production.example
 
 # IDE/editor files
 .vscode/

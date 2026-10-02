@@ -1,0 +1,45 @@
+name: Backend CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: insurance_ci
+          POSTGRES_USER: insurance_ci
+          POSTGRES_PASSWORD: ci-only-not-production
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U insurance_ci"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      SECRET_KEY: ci-only-secret-key-for-isolated-tests-never-use-in-production-123456789
+      DEBUG: 'True'
+      DB_ENGINE: postgresql
+      DB_NAME: insurance_ci
+      DB_USER: insurance_ci
+      DB_PASSWORD: ci-only-not-production
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      EMAIL_BACKEND: django.core.mail.backends.locmem.EmailBackend
+      WHATSAPP_ENABLED: 'False'
+      WHATSAPP_TEST_MODE: 'True'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      - run: python -m pip install -r requirements.lock.txt
+      - run: python manage.py check
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py migrate --noinput
+      - run: python manage.py test --noinput

@@ -1,0 +1,17 @@
+name: Bug report
+description: Report a reproducible application problem using synthetic data.
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps, expected behavior and actual result
+      description: Never include secrets or client/customer records.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Repository commit, browser/runtime and local/staging/production.
+    validations:
+      required: true

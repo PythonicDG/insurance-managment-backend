@@ -1,0 +1,23 @@
+# Resolved in a clean Python 3.11 environment on 2026-10-02.
+# Use this lockfile for handover installs; requirements.txt declares direct dependencies.
+asgiref==3.12.1
+certifi==2026.7.22
+charset-normalizer==3.5.2
+defusedxml==0.7.1
+Django==5.2.17
+django-cors-headers==4.9.0
+djangorestframework==3.18.1
+et_xmlfile==2.0.0
+gunicorn==23.0.0
+idna==3.20
+openpyxl==3.1.5
+packaging==26.3
+pillow==12.3.0
+psycopg==3.3.5
+psycopg-binary==3.3.5
+python-dotenv==1.2.3
+requests==2.34.2
+sqlparse==0.6.0
+typing_extensions==4.16.0
+tzdata==2026.4
+urllib3==2.8.0
