@@ -4,6 +4,59 @@ Open **Bulk Upload** in the application sidebar. Select a customer or insurance
 template, download its Excel file, fill the first worksheet, validate it, and
 review the preview before importing. Validation does not save any records.
 
+For files containing only `S. DATE`, `E. DATE`, `CUT.NAME`, `VEHICAL NO`,
+`CO NAME`, `NET PR.`, and `TOTAL.`, select **Compact Insurance Records**.
+This template also accepts the descriptive column names, such as Start Date,
+Customer Name, Vehicle Number, Net Premium, and Total Premium. Blank spacer
+columns are allowed. `02.10.2025` means 2 October 2025.
+
+Mobile and policy numbers are not required for this template. New customers
+have a blank phone; existing customers are matched by vehicle owner first,
+then by a unique customer name (case insensitive). Ambiguous names or a
+different vehicle owner require review. Existing phone numbers are preserved.
+Bulk customer-name matching ignores case, whitespace, and punctuation (including
+periods in initials). Matching an existing vehicle reuses its customer ID rather
+than creating another customer for a differently formatted name. Genuine owner
+conflicts report both the existing and uploaded customer names.
+Missing policy numbers receive a stable `BULK-` reference based on vehicle and
+coverage dates, so repeated uploads are detected as duplicates. Net premium
+uses the application's existing definition: total premium minus discount.
+The importer calculates discount as `TOTAL. - NET PR.` and rejects negative
+net premiums or net premiums greater than the total. Existing company and
+policy validation rules still apply. The standard templates remain unchanged.
+
+`NEW` and `NEW(...)` vehicle placeholders receive a stable temporary identifier
+for each customer, so different customers using the same placeholder do not share
+a vehicle or policy reference. Preview warnings show the assigned identifier.
+Use the actual registration when available. Repeated placeholders for the same
+customer still use the same vehicle; genuine registration ownership conflicts
+remain errors and identify the earlier Excel row when applicable.
+
+## Re-import after deleting records
+
+Deletion archives records and reserves their identifiers. Bulk insurance imports
+now recover a matching archived policy instead of attempting to insert another
+row with the same policy number. If the spreadsheet has no policy number,
+matching uses vehicle, insurer, and coverage dates, including older `AUTO-`
+references. Recovery reuses the original policy ID/reference and applies the
+spreadsheet values through the existing serializer. Matching customer and vehicle
+links are recovered. If a deleted vehicle has a different archived owner and no
+live policies, the uploaded customer is resolved or created and becomes the owner
+of the recovered vehicle and matching policy. The preview and import show an Excel
+row warning naming the old and new owners. The old customer and unrelated archived
+policies remain archived. Live vehicles and vehicles with live policies still
+reject ownership conflicts. An archived vehicle can also be reused for new coverage.
+Customer uploads restore matching deleted customers instead of skipping them or
+creating duplicates; their archived vehicles and policies remain archived.
+
+Only the matching policy and required parent rows are recovered. Other rows in
+the deletion batch, payments, and documents remain archived. Preview rolls back
+all recovery changes; any row error rolls back the whole import. Live duplicate
+policies, conflicting owners, and active/scheduled policy conflicts remain errors.
+Preview/import results show restored policies separately from newly created rows.
+The recovery migration also adds an optional `NET PR.` mapping to existing
+insurance templates that do not already map net premium, including custom ones.
+
 ## Configure columns in Django Admin
 
 Visit `/admin/` → **Bulk upload** → **Bulk upload templates**. The migrations
@@ -35,7 +88,7 @@ checked when the template is saved. There are no frontend configuration writes.
 
 - `.xlsx` only, at most 10 MB and 2,000 data rows (including blank rows).
 - Row 1 contains headers on the first worksheet; other sheets are ignored.
-- Dates accept native Excel dates, `YYYY-MM-DD`, `DD/MM/YYYY`, or `DD-MM-YYYY`.
+- Dates accept native Excel dates, `YYYY-MM-DD`, `DD/MM/YYYY`, `DD-MM-YYYY`, or `DD.MM.YYYY`.
 - Phone, vehicle, and policy numbers should be stored as text. Excel cannot
   recover leading zeros or digits it already rounded in a numeric cell.
 - Formulas and Excel errors in mapped cells are rejected. Unmapped headers

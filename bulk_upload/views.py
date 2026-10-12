@@ -74,7 +74,7 @@ class UploadView(APIView):
                     receipt = UploadReceipt.objects.create(token_hash=token_hash, template=template, user=request.user)
                 rows, warnings = parse_rows(raw, template, columns)
                 result = process_rows(template.target, rows, columns, self.preview)
-                result["warnings"] = warnings
+                result["warnings"] = warnings + result["warnings"]
                 if not result["valid"]:
                     transaction.set_rollback(True)
                     return Response(result, status=400)
@@ -84,8 +84,9 @@ class UploadView(APIView):
                     result["message"] = "Validation passed. No data has been saved. Preview expires in 30 minutes."
                 else:
                     receipt.created_count = result["created"]
+                    receipt.restored_count = result["restored"]
                     receipt.skipped_count = result["skipped"]
-                    receipt.save(update_fields=["created_count", "skipped_count"])
+                    receipt.save(update_fields=["created_count", "restored_count", "skipped_count"])
                     result["message"] = "Import completed successfully."
                 return Response(result)
         except IntegrityError:

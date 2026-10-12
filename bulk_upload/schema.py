@@ -22,14 +22,15 @@ INSURANCE_FIELDS = {
     "policy_start_date": ("Policy start date", "date"),
     "policy_expiry_date": ("Policy expiry date", "date"),
     "total_premium": ("Total premium", "decimal"),
+    "net_premium": ("Net premium", "decimal"),
     "discount": ("Discount", "decimal"),
     "remarks": ("Remarks", "text"),
 }
 FIELDS = {"customers": CUSTOMER_FIELDS, "insurance": INSURANCE_FIELDS}
 REQUIRED_FIELDS = {
     "customers": {"phone"},
-    "insurance": {"customer_phone", "vehicle_number", "insurance_company_name",
-                  "policy_number", "policy_start_date", "policy_expiry_date", "total_premium"},
+    "insurance": {"vehicle_number", "insurance_company_name",
+                  "policy_start_date", "policy_expiry_date", "total_premium"},
 }
 FIELD_CHOICES = [(key, f"{label} ({key})") for key, (label, _) in
                  {**CUSTOMER_FIELDS, **INSURANCE_FIELDS}.items()]
@@ -64,3 +65,8 @@ def validate_columns(target, columns):
     missing = REQUIRED_FIELDS[target] - fields
     if missing:
         raise ValidationError("Required mappings cannot be removed or disabled: " + ", ".join(sorted(missing)))
+    if target == "insurance" and not any(
+        c.field_name in {"customer_name", "customer_phone"}
+        and (c.is_required or c.default_value.strip()) for c in active
+    ):
+        raise ValidationError("A required customer name or mobile number mapping is needed.")

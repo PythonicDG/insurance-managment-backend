@@ -57,5 +57,6 @@ class UploadReceipt(SoftDeleteModel):
     template = models.ForeignKey(UploadTemplate, on_delete=models.PROTECT)
     user = models.ForeignKey("auth.User", on_delete=models.PROTECT)
     created_count = models.PositiveIntegerField(default=0)
+    restored_count = models.PositiveIntegerField(default=0)
     skipped_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

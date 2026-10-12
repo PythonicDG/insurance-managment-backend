@@ -1,5 +1,5 @@
 import io
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -263,6 +263,389 @@ class BulkUploadTests(APITestCase):
     def test_numeric_and_date_conversions(self):
         self.assertEqual(convert(9876543210.0, "text"), "9876543210")
         self.assertEqual(convert("31/12/2026", "date"), "2026-12-31")
+        self.assertEqual(convert("02.10.2025", "date"), "2025-10-02")
+        with self.assertRaises(ValueError):
+            convert("31.02.2025", "date")
         self.assertEqual(convert(1e20, "text"), "100000000000000000000")
         with self.assertRaises(ValueError):
             convert("NaN", "decimal")
+
+    def compact_data(self):
+        return ["S. DATE", "E. DATE", "CUT.NAME", None, None, "VEHICAL NO", "CO NAME", "NET PR.", "TOTAL."], [
+            "02.10.2025", "01.10.2026", "Alice", None, None, "mh12 ab1234", self.company.name, "1000.00", "1200.00"
+        ]
+
+    def test_compact_format_preview_import_and_duplicate_protection(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        headers, row = self.compact_data()
+        preview = self.submit(headers, [row], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["warnings"], [])
+        self.assertEqual(Customer.objects.count(), 0)
+        self.assertEqual(Vehicle.objects.count(), 0)
+        self.assertEqual(InsuranceRecord.objects.count(), 0)
+        response = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(response.status_code, 200, response.data)
+        record = InsuranceRecord.objects.get()
+        self.assertEqual(record.customer.phone, "")
+        self.assertEqual(record.customer.name, "Alice")
+        self.assertEqual(record.vehicle.vehicle_number, "MH12AB1234")
+        self.assertEqual(record.policy_start_date, date(2025, 10, 2))
+        self.assertEqual(record.policy_expiry_date, date(2026, 10, 1))
+        self.assertEqual(record.total_premium, 1200)
+        self.assertEqual(record.discount, 200)
+        self.assertEqual(record.net_premium, 1000)
+        self.assertTrue(record.policy_number.startswith("BULK-"))
+        self.assertEqual(self.submit(headers, [row], template=template).status_code, 400)
+        self.assertEqual(InsuranceRecord.objects.count(), 1)
+
+    def test_compact_customer_resolution_and_ownership(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        headers, row = self.compact_data()
+        owner = Customer.objects.create(name="Alice", phone="9876543210")
+        Vehicle.objects.create(customer=owner, vehicle_number="MH12AB1234", vehicle_type="Car")
+        preview = self.submit(headers, [row], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        response = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(InsuranceRecord.objects.get().customer_id, owner.pk)
+        owner.refresh_from_db()
+        self.assertEqual(owner.phone, "9876543210")
+        row[2] = "Bob"
+        self.assertEqual(self.submit(headers, [row], template=template).status_code, 400)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_shared_new_placeholder_creates_separate_customer_vehicles(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        headers, first = self.compact_data()
+        first[2], first[5] = "AADARSH HP GAS AGENCY", "NEW(1916)"
+        second = first.copy()
+        second[2] = "SHRI VIGHNAHAR HP GAS"
+        preview = self.submit(headers, [first, second], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["created"], 2)
+        self.assertEqual(Vehicle.objects.count(), 0)
+        self.assertEqual(len(preview.data["warnings"]), 2)
+        imported = self.submit(headers, [first, second], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        records = list(InsuranceRecord.objects.select_related("vehicle", "customer"))
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(records[0].vehicle_id, records[1].vehicle_id)
+        self.assertNotEqual(records[0].policy_number, records[1].policy_number)
+        for record in records:
+            self.assertTrue(record.vehicle.vehicle_number.startswith("NEW(1916)-"))
+            self.assertEqual(record.vehicle.customer_id, record.customer_id)
+            self.assertEqual(record.net_premium, 1000)
+        numbers = set(Vehicle.objects.values_list("vehicle_number", flat=True))
+        duplicate = self.submit(headers, [second, first], template=template)
+        self.assertEqual(duplicate.status_code, 400, duplicate.data)
+        self.assertEqual(set(Vehicle.objects.values_list("vehicle_number", flat=True)), numbers)
+
+    def test_same_registration_for_different_customers_in_file_is_rejected(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        headers, first = self.compact_data()
+        second = first.copy()
+        second[2] = "Bob"
+        response = self.submit(headers, [first, second], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data["errors"][0]["row"], 3)
+        self.assertIn("Excel row 2", str(response.data["errors"]))
+        self.assertEqual(Vehicle.objects.count(), 0)
+
+    def test_compact_invalid_rows_roll_back_whole_file(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        headers, row = self.compact_data()
+        for name, net in [("", "1000"), ("Bob", "1201"), ("Bob", "-1"), ("Bob", "1000.001")]:
+            invalid = row.copy()
+            invalid[2], invalid[5], invalid[7] = name, "MH12AB1235", net
+            response = self.submit(headers, [row, invalid], template=template)
+            self.assertEqual(response.status_code, 400, response.data)
+            self.assertEqual(response.data["errors"][0]["row"], 3)
+            self.assertEqual(Customer.objects.count(), 0)
+            self.assertEqual(Vehicle.objects.count(), 0)
+
+    def test_compact_ambiguous_customer_names_require_review(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        Customer.objects.create(name="Alice", phone="9876543210")
+        Customer.objects.create(name="Alice", phone="9876543211")
+        headers, row = self.compact_data()
+        response = self.submit(headers, [row], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Multiple customers", str(response.data["errors"]))
+        self.assertEqual(InsuranceRecord.objects.count(), 0)
+
+    def test_compact_template_accepts_descriptive_headers(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        headers = ["Start Date", "End Date", "Customer Name", "Vehicle Number", "Insurance Company", "Net Premium", "Total Premium"]
+        rows = [["02.10.2025", "01.10.2026", "Alice", "MH12AB1234", self.company.name, "1000", "1200"]]
+        response = self.submit(headers, rows, template=template)
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_standard_template_still_requires_phone_and_policy(self):
+        headers, row = self.insurance_data()
+        for index in (0, 3):
+            response = self.submit(headers[:index] + headers[index + 1:], [row[:index] + row[index + 1:]], template=self.insurance)
+            self.assertEqual(response.status_code, 400)
+
+    def make_archived_compact_policy(self, policy="AUTO-OLD", vehicle_number="MH12AB1234"):
+        customer = Customer.objects.create(name="Alice", phone="9876543210")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number=vehicle_number, vehicle_type="Car")
+        record = InsuranceRecord.objects.create(customer=customer, vehicle=vehicle, insurance_company=self.company,
+            policy_number=policy, policy_start_date=date(2025, 10, 2), policy_expiry_date=date(2026, 10, 1), total_premium=1200)
+        return customer, vehicle, record
+
+    def test_reimport_recovers_legacy_policy_and_links_without_restoring_entire_batch(self):
+        from payments.models import Payment
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        other_customer, other_vehicle, other_record = self.make_archived_compact_policy("AUTO-OTHER", "MH12AB1235")
+        payment = Payment.objects.create(insurance_record=record, amount=100, payment_method="Cash")
+        Customer.objects.all().delete()  # All records share one deletion batch.
+        headers, row = self.compact_data()
+        preview = self.submit(headers, [row], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["restored"], 1)
+        self.assertEqual(preview.data["created"], 0)
+        self.assertEqual(preview.data["sample"][0]["status"], "restored")
+        self.assertEqual(Customer.objects.count(), 0)
+        self.assertEqual(Vehicle.objects.count(), 0)
+        self.assertEqual(InsuranceRecord.objects.count(), 0)
+        imported = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(imported.data["restored"], 1)
+        restored = InsuranceRecord.objects.get()
+        self.assertEqual(restored.pk, record.pk)
+        self.assertEqual(restored.policy_number, "AUTO-OLD")
+        self.assertEqual(restored.customer_id, customer.pk)
+        self.assertEqual(restored.vehicle_id, vehicle.pk)
+        self.assertEqual(restored.net_premium, 1000)
+        self.assertEqual(UploadReceipt.objects.get().restored_count, 1)
+        self.assertEqual(Customer.objects.count(), 1)
+        self.assertEqual(Vehicle.objects.count(), 1)
+        self.assertEqual(Payment.objects.count(), 0)
+        payment.refresh_from_db()
+        self.assertIsNotNone(payment.deleted_at)
+        other_record.refresh_from_db()
+        self.assertIsNotNone(other_record.deleted_at)
+
+    def test_standard_reimport_restores_explicit_archived_policy_number(self):
+        headers, row = self.insurance_data()
+        preview = self.submit(headers, [row], template=self.insurance)
+        self.assertEqual(self.submit(headers, [row], template=self.insurance, token=preview.data["preview_token"]).status_code, 200)
+        record = InsuranceRecord.objects.get()
+        record.delete()
+        preview = self.submit(headers, [row], template=self.insurance)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["restored"], 1)
+        imported = self.submit(headers, [row], template=self.insurance, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().pk, record.pk)
+
+    def test_invalid_file_rolls_back_archived_link_and_policy_recovery(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        customer.delete()
+        headers, row = self.compact_data()
+        invalid = row.copy()
+        invalid[5], invalid[6] = "MH12AB1235", "Unknown insurer"
+        preview = self.submit(headers, [row], template=template)
+        response = self.submit(headers, [row, invalid], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(Customer.objects.count(), 0)
+        self.assertEqual(Vehicle.objects.count(), 0)
+        self.assertEqual(InsuranceRecord.objects.count(), 0)
+        # State can change after a successful preview; import must roll back too.
+        self.company.is_active = False
+        self.company.save()
+        imported = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 400, imported.data)
+        self.assertEqual(UploadReceipt.objects.count(), 0)
+        record.refresh_from_db()
+        self.assertIsNotNone(record.deleted_at)
+
+    def test_archived_vehicle_owner_mismatch_uses_uploaded_customer(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        customer.delete()
+        headers, row = self.compact_data()
+        row[2] = "Bob"
+        response = self.submit(headers, [row], template=template)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["restored"], 1)
+        self.assertIn("Alice", str(response.data["warnings"]))
+        self.assertIn("Bob", str(response.data["warnings"]))
+        self.assertEqual(Vehicle.objects.count(), 0)
+        self.assertEqual(Customer.objects.count(), 0)
+        vehicle.refresh_from_db()
+        self.assertEqual(vehicle.customer_id, customer.pk)
+        imported = self.submit(headers, [row], template=template, token=response.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        restored = InsuranceRecord.objects.get()
+        self.assertEqual(restored.pk, record.pk)
+        self.assertEqual(restored.customer.name, "Bob")
+        self.assertEqual(restored.vehicle.customer_id, restored.customer_id)
+        self.assertEqual(Customer.objects.count(), 1)
+        customer.refresh_from_db()
+        self.assertIsNotNone(customer.deleted_at)
+
+    def test_reassigned_archived_vehicle_and_new_customer_roll_back_on_file_error(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        customer.delete()
+        headers, row = self.compact_data()
+        row[2] = "Bob"
+        invalid = row.copy()
+        invalid[5], invalid[6] = "MH12AB1235", "Unknown insurer"
+        response = self.submit(headers, [row, invalid], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(Customer.all_objects.count(), 1)
+        vehicle.refresh_from_db()
+        self.assertEqual(vehicle.customer_id, customer.pk)
+        self.assertIsNotNone(vehicle.deleted_at)
+        record.refresh_from_db()
+        self.assertIsNotNone(record.deleted_at)
+
+    def test_archived_vehicle_reassignment_reuses_existing_uploaded_customer(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        customer.delete()
+        replacement = Customer.objects.create(name="Bob", phone="9876543212")
+        headers, row = self.compact_data()
+        row[2] = "Bob"
+        preview = self.submit(headers, [row], template=template)
+        imported = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().customer_id, replacement.pk)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_deleted_customer_upload_is_restored_instead_of_skipped(self):
+        customer = Customer.objects.create(name="Alice", phone="9876543210")
+        customer.delete()
+        headers, rows = ["Name", "Phone"], [["Alice", "9876543210"]]
+        preview = self.submit(headers, rows)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["restored"], 1)
+        self.assertEqual(preview.data["skipped"], 0)
+        self.assertEqual(Customer.objects.count(), 0)
+        imported = self.submit(headers, rows, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(Customer.objects.get().pk, customer.pk)
+
+    def test_archived_vehicle_with_live_policy_cannot_change_owner(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        Vehicle.all_objects.filter(pk=vehicle.pk).update(deleted_at=timezone.now())
+        headers, row = self.compact_data()
+        row[2] = "Bob"
+        response = self.submit(headers, [row], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        vehicle.refresh_from_db()
+        self.assertEqual(vehicle.customer_id, customer.pk)
+        self.assertIsNotNone(vehicle.deleted_at)
+
+    def test_standard_archived_owner_reassignment_uses_uploaded_phone(self):
+        customer, vehicle, record = self.make_archived_compact_policy("POL-1")
+        customer.delete()
+        headers, row = self.insurance_data()
+        row[0] = "9876543212"
+        headers.append("Customer Name")
+        row.append("Bob")
+        preview = self.submit(headers, [row], template=self.insurance)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        imported = self.submit(headers, [row], template=self.insurance, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        restored = InsuranceRecord.objects.get()
+        self.assertEqual(restored.pk, record.pk)
+        self.assertEqual(restored.customer.name, "Bob")
+        self.assertEqual(restored.customer.phone, "9876543212")
+        self.assertEqual(restored.vehicle.customer_id, restored.customer_id)
+
+    def test_standard_insurance_maps_net_pr_header(self):
+        headers, row = self.insurance_data()
+        headers.append("NET PR.")
+        row.append("1000")
+        preview = self.submit(headers, [row], template=self.insurance)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["warnings"], [])
+        imported = self.submit(headers, [row], template=self.insurance, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().net_premium, 1000)
+
+    def test_reimport_of_live_legacy_auto_policy_is_rejected(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        self.make_archived_compact_policy()
+        headers, row = self.compact_data()
+        response = self.submit(headers, [row], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("AUTO-OLD", str(response.data["errors"]))
+        self.assertEqual(InsuranceRecord.objects.count(), 1)
+
+    def test_archived_vehicle_can_be_reused_for_new_coverage_without_restoring_old_policy(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, old = self.make_archived_compact_policy()
+        customer.delete()
+        headers, row = self.compact_data()
+        row[0], row[1] = "02.10.2026", "01.10.2027"
+        preview = self.submit(headers, [row], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["created"], 1)
+        imported = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().vehicle_id, vehicle.pk)
+        self.assertEqual(Customer.objects.count(), 1)
+        old.refresh_from_db()
+        self.assertIsNotNone(old.deleted_at)
+
+    def test_archived_owner_name_formatting_differences_are_accepted(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        customer.name = "SUSHMA A. DAWKHAR"
+        customer.save()
+        customer.delete()
+        headers, row = self.compact_data()
+        row[2] = "sushma  a\u00a0dawkhar"
+        preview = self.submit(headers, [row], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        imported = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().customer_id, customer.pk)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_live_vehicle_uses_existing_owner_with_formatted_name_and_phone(self):
+        customer = Customer.objects.create(name="SUSHMA A. DAWKHAR", phone="9876543210")
+        vehicle = Vehicle.objects.create(customer=customer, vehicle_number="MH12AB1234", vehicle_type="Car")
+        headers, row = self.insurance_data()
+        headers.append("Customer Name")
+        row.append("sushma a dawkhar")
+        preview = self.submit(headers, [row], template=self.insurance)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        imported = self.submit(headers, [row], template=self.insurance, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().customer_id, customer.pk)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_formatted_name_lookup_reuses_customer_for_a_second_vehicle(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer = Customer.objects.create(name="SUSHMA A. DAWKHAR", phone="9876543210")
+        headers, row = self.compact_data()
+        row[2] = "SUSHMA A DAWKHAR"
+        preview = self.submit(headers, [row], template=template)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        imported = self.submit(headers, [row], template=template, token=preview.data["preview_token"])
+        self.assertEqual(imported.status_code, 200, imported.data)
+        self.assertEqual(InsuranceRecord.objects.get().customer_id, customer.pk)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_real_owner_conflict_reports_both_names_without_changing_ownership(self):
+        template = UploadTemplate.objects.get(name="Compact Insurance Records")
+        customer, vehicle, record = self.make_archived_compact_policy()
+        record.delete()  # The vehicle remains live; its owner cannot be replaced.
+        headers, row = self.compact_data()
+        row[2] = "Bob"
+        response = self.submit(headers, [row], template=template)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Alice", str(response.data["errors"]))
+        self.assertIn("Bob", str(response.data["errors"]))
+        vehicle.refresh_from_db()
+        self.assertEqual(vehicle.customer_id, customer.pk)
+        self.assertIsNone(vehicle.deleted_at)

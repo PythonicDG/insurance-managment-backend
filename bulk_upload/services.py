@@ -1,20 +1,24 @@
 import hashlib
 import io
 import json
+import re
+import unicodedata
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from zipfile import BadZipFile, ZipFile
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from rest_framework.exceptions import ValidationError
 
 from customers.models import Customer
 from customers.serializers import CustomerSerializer
-from insurance.models import InsuranceCompany
+from insurance.models import InsuranceCompany, InsuranceRecord
 from insurance.serializers import InsuranceRecordCreateUpdateSerializer
+from vehicles.models import Vehicle
 from .schema import FIELDS, normalize_header, validate_columns
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -57,12 +61,12 @@ def convert(value, kind):
             return value.date().isoformat()
         if isinstance(value, date):
             return value.isoformat()
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
             try:
                 return datetime.strptime(str(value).strip(), fmt).date().isoformat()
             except ValueError:
                 continue
-        raise ValueError("Use an Excel date, YYYY-MM-DD, or DD/MM/YYYY.")
+        raise ValueError("Use an Excel date, YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, or DD.MM.YYYY.")
     try:
         number = Decimal(str(value).strip())
     except InvalidOperation:
@@ -154,7 +158,164 @@ def parse_rows(raw, template, columns):
             workbook.close()
 
 
-def import_row(target, data):
+def prepare_insurance_data(data):
+    """Adapt compact spreadsheets without relaxing the normal record API."""
+    data = data.copy()
+    net = data.pop("net_premium", None)
+    if net is not None:
+        net = Decimal(net)
+        total = Decimal(data["total_premium"])
+        if net < 0 or net > total or net.as_tuple().exponent < -2:
+            raise ValidationError({"net_premium": "Net premium must be between zero and total premium, with at most two decimal places."})
+        discount = total - net
+        if "discount" in data and Decimal(data["discount"]) != discount:
+            raise ValidationError({"net_premium": "Net premium must equal total premium minus discount."})
+        data["discount"] = str(discount)
+    if not data.get("policy_number"):
+        # Stable across preview/import and repeated uploads, independent of row order.
+        identity = [Vehicle.normalize_vehicle_number(data.get("vehicle_number", "")),
+                    data.get("policy_start_date"), data.get("policy_expiry_date")]
+        digest = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:32].upper()
+        data["policy_number"] = f"BULK-{digest}"
+    return data
+
+
+def customer_name_key(name):
+    """Treat spacing and punctuation in spreadsheet names as formatting."""
+    return "".join(c for c in unicodedata.normalize("NFKC", name or "").casefold() if c.isalnum())
+
+
+def prepare_placeholder_vehicle(data, notices):
+    """NEW labels are temporary references, not globally unique registrations."""
+    number = Vehicle.normalize_vehicle_number(data.get("vehicle_number", ""))
+    if not re.fullmatch(r"NEW(?:\([^()]+\))?", number):
+        return data
+    owner = customer_name_key(data.get("customer_name", "")) or Customer.normalize_phone(data.get("customer_phone", ""))
+    if not owner:
+        raise ValidationError({"customer_name": "A customer name or mobile number is required for a NEW vehicle placeholder."})
+    digest = hashlib.sha256(json.dumps([number, owner]).encode()).hexdigest()[:16].upper()
+    data = data.copy()
+    data["vehicle_number"] = f"{number[:30]}-{digest}"
+    notices.append(f"Temporary vehicle '{number}' uses '{data['vehicle_number']}' for this customer. Replace it with the actual registration when available.")
+    return data
+
+
+def check_vehicle_owner(customer, data):
+    name = data.get("customer_name", "").strip()
+    phone = Customer.normalize_phone(data.get("customer_phone", ""))
+    if not (customer_name_key(name) or phone) or (
+        name and customer_name_key(customer.name) != customer_name_key(name)
+    ) or (phone and customer.phone and phone != Customer.normalize_phone(customer.phone)):
+        raise ValidationError({"vehicle_number": (
+            f"Vehicle '{data.get('vehicle_number', '')}' owner is '{customer.name or '(name missing)'}', but the uploaded customer is "
+            f"'{name or '(name missing)'}'. Customer details do not match; review this row."
+        )})
+
+
+def resolve_customer_without_phone(data, *, use_vehicle=True):
+    name = data.get("customer_name", "").strip()
+    if not customer_name_key(name) or len(name) > 255:
+        raise ValidationError({"customer_name": "Enter a customer name of at most 255 characters when mobile number is missing."})
+    vehicle_number = Vehicle.normalize_vehicle_number(data.get("vehicle_number", ""))
+    vehicle = Vehicle.objects.select_related("customer").filter(vehicle_number__iexact=vehicle_number).first() if use_vehicle else None
+    if vehicle:
+        check_vehicle_owner(vehicle.customer, data)
+        return vehicle.customer
+    key = customer_name_key(name)
+    matches = []
+    for customer in Customer.objects.only("id", "name"):
+        if customer_name_key(customer.name) == key:
+            matches.append(customer)
+            if len(matches) == 2:
+                break
+    if len(matches) > 1:
+        raise ValidationError({"customer_name": "Multiple customers have this name. Supply a mobile number or review the existing vehicle owner."})
+    if matches:
+        return matches[0]
+    return Customer.objects.create(name=name, phone="")
+
+
+def check_archived_owner(customer, data):
+    check_vehicle_owner(customer, data)
+
+
+def revive_row(row):
+    """Recover only this row, never its entire deletion batch or children."""
+    if row.deleted_at is not None:
+        type(row).all_objects.filter(pk=row.pk).update(deleted_at=None, deletion_batch=None)
+        row.refresh_from_db()
+
+
+def resolve_uploaded_customer(data):
+    """Resolve a replacement owner without using the archived vehicle's owner."""
+    phone = Customer.normalize_phone(data.get("customer_phone", ""))
+    if not phone:
+        return resolve_customer_without_phone(data, use_vehicle=False)
+    values = {field: data[f"customer_{field}"] for field in ("name", "phone", "email", "address")
+              if f"customer_{field}" in data}
+    serializer = CustomerSerializer(data=values)
+    serializer.is_valid(raise_exception=True)
+    matches = Customer.objects.filter(phone=phone)
+    name = data.get("customer_name", "")
+    if name:
+        matches = [c for c in matches if customer_name_key(c.name) == customer_name_key(name)]
+    else:
+        matches = list(matches[:2])
+    if len(matches) > 1:
+        raise ValidationError({"customer_phone": "Multiple customers match these details. Review the customer records."})
+    return matches[0] if matches else serializer.save()
+
+
+def recover_insurance_links(data, notices):
+    vehicle = Vehicle.all_objects.select_for_update().select_related("customer").filter(
+        vehicle_number__iexact=Vehicle.normalize_vehicle_number(data.get("vehicle_number", ""))
+    ).first()
+    if vehicle:
+        customer = Customer.all_objects.select_for_update().get(pk=vehicle.customer_id)
+        try:
+            check_vehicle_owner(customer, data)
+        except ValidationError:
+            # A deleted vehicle reserves its number, but its archived owner must
+            # not block a fresh upload. Never reassign a vehicle with live data.
+            if vehicle.deleted_at is None or InsuranceRecord.objects.filter(vehicle=vehicle).exists():
+                raise
+            original_name = customer.name
+            customer = resolve_uploaded_customer(data)
+            vehicle.customer = customer
+            vehicle.save(update_fields=["customer", "updated_at"])
+            vehicle._bulk_owner_changed = True
+            notices.append(f"Archived vehicle {vehicle.vehicle_number}: owner changed from '{original_name}' to '{customer.name}' using the uploaded customer.")
+        revive_row(customer)
+        revive_row(vehicle)
+        data["customer_id"] = customer.pk
+    return vehicle
+
+
+def archived_policy(data, vehicle, supplied_policy):
+    records = InsuranceRecord.all_objects.select_for_update().filter(deleted_at__isnull=False)
+    if supplied_policy:
+        record = records.filter(policy_number__iexact=data["policy_number"]).first()
+        if record and (not vehicle or record.vehicle_id != vehicle.pk):
+            raise ValidationError({"policy_number": "This archived policy number belongs to a different vehicle."})
+        return record
+    if not vehicle:
+        return None
+    # Also recognize references generated by earlier AUTO- import versions.
+    matches = list(InsuranceRecord.all_objects.select_for_update().filter(
+        vehicle=vehicle, insurance_company_id=data["insurance_company_id"],
+        policy_start_date=data["policy_start_date"], policy_expiry_date=data["policy_expiry_date"],
+    )[:2])
+    if len(matches) > 1:
+        raise ValidationError({"policy_number": "Multiple policies match this vehicle and coverage. Supply the policy number using the standard template."})
+    if matches and matches[0].deleted_at is None:
+        # Preserve duplicate validation even for old AUTO- references on expired policies.
+        data["policy_number"] = matches[0].policy_number
+        return None
+    return matches[0] if matches else None
+
+
+def import_row(target, data, notices=None):
+    notices = notices if notices is not None else []
     if target == "customers":
         serializer = CustomerSerializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -164,26 +325,68 @@ def import_row(target, data):
             existing = existing.filter(name__iexact=values["name"])
         if existing.exists():
             return "skipped"
+        archived = Customer.all_objects.filter(deleted_at__isnull=False, phone=values["phone"])
+        if values.get("name"):
+            archived = archived.filter(name__iexact=values["name"])
+        matches = list(archived[:2])
+        if len(matches) > 1:
+            raise ValidationError({"phone": "Multiple deleted customers match these details. Review the archived customers."})
+        if matches:
+            serializer = CustomerSerializer(instance=matches[0], data=data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save(deleted_at=None, deletion_batch=None)
+            return "restored"
         serializer.save()
         return "created"
-    data = data.copy()
+    supplied_policy = bool(data.get("policy_number"))
+    data = prepare_placeholder_vehicle(data, notices)
+    data = prepare_insurance_data(data)
     company_name = data.pop("insurance_company_name", "")
     companies = list(InsuranceCompany.objects.filter(name__iexact=company_name, is_active=True)[:2])
     if len(companies) != 1:
         raise ValidationError({"insurance_company_name": "Enter the exact name of one existing active insurance company."})
     data["insurance_company_id"] = companies[0].pk
-    serializer = InsuranceRecordCreateUpdateSerializer(data=data)
+    vehicle = recover_insurance_links(data, notices)
+    archived = archived_policy(data, vehicle, supplied_policy)
+    if archived:
+        if not getattr(vehicle, "_bulk_owner_changed", False):
+            customer = Customer.all_objects.select_for_update().get(pk=archived.customer_id)
+            check_archived_owner(customer, data)
+            if vehicle.customer_id != customer.pk:
+                raise ValidationError({"vehicle_number": "The archived policy and vehicle have different customer owners."})
+            revive_row(customer)
+            data["customer_id"] = customer.pk
+        data["policy_number"] = archived.policy_number
+    if not data.get("customer_phone") and not data.get("customer_id"):
+        data["customer_id"] = resolve_customer_without_phone(data).pk
+    serializer = InsuranceRecordCreateUpdateSerializer(instance=archived, data=data)
     serializer.is_valid(raise_exception=True)
-    record = serializer.save()
+    if archived:
+        # Do not bypass current/scheduled policy conflicts by using update().
+        InsuranceRecord.activate_due_scheduled(vehicle_id=vehicle.pk)
+        for old in InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True, policy_expiry_date__lt=timezone.localdate()):
+            old.is_active = False
+            old.save(update_fields=["is_active"])
+        if InsuranceRecord.objects.filter(vehicle=vehicle, is_active=True).exists() or InsuranceRecord.objects.filter(
+            vehicle=vehicle, is_active=False, policy_start_date__gt=timezone.localdate(), renewed_policy__isnull=True,
+        ).exists():
+            raise ValidationError({"vehicle_number": "An active or scheduled policy already exists for this vehicle. Review or renew it before restoring this row."})
+        start = serializer.validated_data["policy_start_date"]
+        expiry = serializer.validated_data["policy_expiry_date"]
+        record = serializer.save(deleted_at=None, deletion_batch=None,
+                                 is_active=start <= timezone.localdate() <= expiry)
+    else:
+        record = serializer.save()
     if record.vehicle.customer_id != record.customer_id:
         raise ValidationError({"vehicle_number": "This vehicle belongs to a different customer. Review the customer details."})
-    return "created"
+    return "restored" if archived else "created"
 
 
 def process_rows(target, rows, columns, preview):
     """Exercise the existing creation rules, rolling back previews and failed files."""
-    errors, sample = [], []
-    counts = {"created": 0, "skipped": 0}
+    errors, sample, warnings = [], [], []
+    seen_vehicles = {}
+    counts = {"created": 0, "skipped": 0, "restored": 0}
     names = {c.field_name: c.column_name for c in columns}
     with transaction.atomic():
         for number, data, cell_errors in rows:
@@ -191,8 +394,12 @@ def process_rows(target, rows, columns, preview):
                 with transaction.atomic():
                     if cell_errors:
                         raise ValidationError(cell_errors)
-                    result = import_row(target, data)
+                    notices = []
+                    result = import_row(target, data, notices)
                     counts[result] += 1
+                    warnings.extend(f"Excel row {number}: {notice}" for notice in notices)
+                    if target == "insurance":
+                        seen_vehicles.setdefault(Vehicle.normalize_vehicle_number(data.get("vehicle_number", "")), number)
                     if len(sample) < 10:
                         sample.append({"row": number, "status": result, "values": {names.get(k, k): v for k, v in data.items()}})
             except (ValidationError, DjangoValidationError, IntegrityError) as exc:
@@ -202,13 +409,18 @@ def process_rows(target, rows, columns, preview):
                     detail = exc.message_dict if hasattr(exc, "message_dict") else exc.messages
                 else:
                     detail = {"record": "A duplicate or conflicting record was detected. Review this row."}
+                if isinstance(detail, dict) and "vehicle_number" in detail:
+                    earlier = seen_vehicles.get(Vehicle.normalize_vehicle_number(data.get("vehicle_number", "")))
+                    if earlier:
+                        detail["vehicle_number"] = f"{detail['vehicle_number']} The same vehicle identifier also appears in Excel row {earlier}; check both rows."
                 if isinstance(detail, dict):
                     detail = {names.get(k, k): v for k, v in detail.items()}
                 errors.append({"row": number, "errors": detail})
         if preview or errors:
             transaction.set_rollback(True)
     return {"valid": not errors, "total_rows": len(rows), "created": counts["created"] if not errors or preview else 0,
-            "skipped": counts["skipped"], "errors": errors, "sample": sample}
+            "restored": counts["restored"] if not errors or preview else 0,
+            "skipped": counts["skipped"], "errors": errors, "sample": sample, "warnings": warnings}
 
 
 def sample_workbook(template, columns):
@@ -229,7 +441,12 @@ def sample_workbook(template, columns):
     help_sheet = workbook.create_sheet("Instructions")
     help_sheet.append(["Upload template", template.name])
     help_sheet.append(["Instructions", "Fill the first worksheet. Headers are on row 1. Maximum 2,000 data rows / 10 MB. No formulas."])
-    help_sheet.append(["Dates", "Excel dates, YYYY-MM-DD, or DD/MM/YYYY (day first)."])
+    help_sheet.append(["Dates", "Excel dates, YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, or DD.MM.YYYY (day first)."])
+    if template.target == "insurance":
+        help_sheet.append(["Deleted records", "Matching archived policies and customer/vehicle links are recovered. Other archived records and payments remain archived."])
+        help_sheet.append(["Archived owner changes", "A deleted vehicle with no live policies can use the uploaded customer. Preview warnings show the old and new owners; review before importing."])
+        help_sheet.append(["Missing details", "Without a mobile number, customer name is required. Missing policy numbers receive a stable BULK- reference."])
+        help_sheet.append(["Net premium", "Net premium equals total premium minus discount. If supplied, the discount is calculated from these values."])
     help_sheet.append(["Duplicates", "Existing customers (same phone/name) are skipped. Duplicate policies are rejected."])
     help_sheet.append(["Insurance company", "Use the exact name of an existing active company from Settings."])
     help_sheet.append(["Column", "Required", "Type", "Default", "Accepted alternative headers"])

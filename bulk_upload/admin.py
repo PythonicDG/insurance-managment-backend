@@ -49,8 +49,8 @@ class UploadTemplateAdmin(SoftDeleteAdmin):
 
 @admin.register(UploadReceipt)
 class UploadReceiptAdmin(SoftDeleteAdmin):
-    list_display = ["template", "user", "created_count", "skipped_count", "created_at"]
-    readonly_fields = ["template", "user", "created_count", "skipped_count", "created_at", "token_hash"]
+    list_display = ["template", "user", "created_count", "restored_count", "skipped_count", "created_at"]
+    readonly_fields = ["template", "user", "created_count", "restored_count", "skipped_count", "created_at", "token_hash"]
 
     def has_add_permission(self, request):
         return False
