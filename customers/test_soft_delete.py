@@ -54,8 +54,9 @@ class SoftDeleteTests(TestCase):
     def test_every_application_model_supports_soft_delete(self):
         labels = {"accounts", "customers", "vehicles", "insurance", "payments",
                   "settings_app", "whatsapp_integration", "bulk_upload", "dashboard"}
+        transient_models = {"accounts.AccountChangeChallenge"}
         for model in apps.get_models():
-            if model._meta.app_label in labels:
+            if model._meta.app_label in labels and model._meta.label not in transient_models:
                 with self.subTest(model=model._meta.label):
                     self.assertTrue(issubclass(model, SoftDeleteModel))
                     self.assertIsInstance(model._base_manager.all(), SoftDeleteQuerySet)
@@ -261,10 +262,98 @@ class SoftDeleteTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["has_change_permission"])
-        self.assertFalse(response.context["has_delete_permission"])
+        self.assertTrue(response.context["has_delete_permission"])
         self.assertEqual(self.client.post(url, {"name": "Changed"}).status_code, 403)
         self.customer.refresh_from_db()
         self.assertEqual(self.customer.name, "Archive Test")
+
+    def test_admin_bulk_delete_all_archived_records_permanently(self):
+        self.login_admin()
+        self.customer.delete()
+        other = Customer.objects.create(name="Another archived customer", phone="8888888888")
+        other.delete()
+        url = "/admin/customers/customer/?deletion_status=deleted"
+        selection = {"action": "delete_selected", "_selected_action": [str(self.customer.pk)],
+                     "select_across": "1", "index": "0"}
+        response = self.client.post(url, selection)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "PERMANENT deletion")
+        self.assertContains(response, other.name)
+        self.assertTrue(Customer.all_objects.filter(pk=self.customer.pk).exists())
+        response = self.client.post(url, {**selection, "post": "yes"}, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Successfully deleted 2 Customers")
+        for model, row in [(Customer, self.customer), (Customer, other), (Vehicle, self.vehicle),
+                           (InsuranceRecord, self.record), (Payment, self.payment)]:
+            self.assertFalse(model.all_objects.filter(pk=row.pk).exists())
+        self.log.refresh_from_db()
+        self.assertIsNone(self.log.customer_id)
+        self.assertIsNone(self.log.insurance_record_id)
+        self.assertIsNone(self.log.payment_id)
+
+    def test_admin_mixed_selection_archives_active_and_purges_deleted(self):
+        self.login_admin()
+        self.customer.delete()
+        active = Customer.objects.create(name="Keep as archived", phone="8888888888")
+        response = self.client.post("/admin/customers/customer/?deletion_status=all", {
+            "action": "delete_selected", "_selected_action": [str(self.customer.pk), str(active.pk)],
+            "post": "yes", "index": "0",
+        }, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Customer.all_objects.filter(pk=self.customer.pk).exists())
+        self.assertIsNotNone(Customer.all_objects.get(pk=active.pk).deleted_at)
+
+    def test_admin_archived_detail_delete_permanently_removes_record(self):
+        self.login_admin()
+        self.customer.delete()
+        url = f"/admin/customers/customer/{self.customer.pk}/delete/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "PERMANENT deletion")
+        response = self.client.post(url, {"post": "yes"}, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Customer.all_objects.filter(pk=self.customer.pk).exists())
+
+    def test_admin_purge_cannot_cascade_into_active_records(self):
+        self.login_admin()
+        self.customer.delete()
+        active = Vehicle.objects.create(customer=self.customer, vehicle_number="LIVE-CHILD")
+        selection = {"action": "delete_selected", "_selected_action": [str(self.customer.pk)],
+                     "post": "yes", "index": "0"}
+        response = self.client.post("/admin/customers/customer/?deletion_status=deleted", selection)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Active Vehicle")
+        self.assertTrue(Customer.all_objects.filter(pk=self.customer.pk).exists())
+        self.assertTrue(Vehicle.objects.filter(pk=active.pk).exists())
+        with self.assertRaises(ProtectedError):
+            admin.site._registry[Customer].delete_queryset(
+                None, Customer.all_objects.filter(pk=self.customer.pk)
+            )
+
+    def test_admin_purge_respects_protected_relations(self):
+        self.login_admin()
+        template = UploadTemplate.objects.create(name="Protected archived template", target="customers")
+        receipt = UploadReceipt.objects.create(token_hash="purge-protected", template=template, user=self.user)
+        template.delete()
+        response = self.client.post("/admin/bulk_upload/uploadtemplate/?deletion_status=deleted", {
+            "action": "delete_selected", "_selected_action": [str(template.pk)], "post": "yes", "index": "0",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["protected"])
+        self.assertTrue(UploadTemplate.all_objects.filter(pk=template.pk).exists())
+        self.assertTrue(UploadReceipt.objects.filter(pk=receipt.pk).exists())
+
+    def test_admin_purge_requires_related_delete_permissions(self):
+        self.customer.delete()
+        self.user.is_staff = True
+        self.user.save()
+        self.user.user_permissions.add(Permission.objects.get(codename="delete_customer"))
+        self.client.force_login(self.user)
+        response = self.client.post("/admin/customers/customer/?deletion_status=deleted", {
+            "action": "delete_selected", "_selected_action": [str(self.customer.pk)], "post": "yes", "index": "0",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Customer.all_objects.filter(pk=self.customer.pk).exists())
 
     def test_admin_restore_action_restores_related_records(self):
         self.login_admin()

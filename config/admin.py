@@ -1,7 +1,8 @@
 from django.contrib import admin, messages
+from django.contrib.admin.utils import NestedObjects
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
-from django.db.models.deletion import CASCADE
+from django.db import IntegrityError, transaction
+from django.db.models.deletion import CASCADE, ProtectedError
 
 from .soft_delete import SoftDeleteModel
 
@@ -29,7 +30,7 @@ class DeletionStatusFilter(admin.SimpleListFilter):
 
 
 class SoftDeleteAdmin(admin.ModelAdmin):
-    """Show the actual archival cascade rather than Django's physical-delete graph."""
+    """Archive active records and permanently delete already archived records."""
 
     actions = ["restore_selected"]
 
@@ -56,10 +57,33 @@ class SoftDeleteAdmin(admin.ModelAdmin):
             return False
         return super().has_change_permission(request, obj)
 
-    def has_delete_permission(self, request, obj=None):
-        if obj is not None and obj.deleted_at is not None:
-            return False
-        return super().has_delete_permission(request, obj)
+    def _purge_collector(self, queryset):
+        collector = NestedObjects(using=queryset.db)
+        collector.collect(queryset)
+        # An archived parent can acquire live children after archival. Never
+        # physically cascade into those records, even from the All filter.
+        active = [obj for model, rows in collector.data.items()
+                  if issubclass(model, SoftDeleteModel)
+                  for obj in rows if obj.deleted_at is None]
+        return collector, active
+
+    def delete_queryset(self, request, queryset):
+        with transaction.atomic(using=queryset.db):
+            rows = list(queryset.select_for_update())
+            archived_ids = [obj.pk for obj in rows if obj.deleted_at is not None]
+            active_ids = [obj.pk for obj in rows if obj.deleted_at is None]
+            archived = self.model.all_objects.using(queryset.db).filter(pk__in=archived_ids)
+            collector, active = self._purge_collector(archived)
+            if collector.protected or active:
+                raise ProtectedError("Cannot permanently delete protected or active related records.",
+                                     set(collector.protected) | set(active))
+            # Collect before archival so a mixed selection cannot purge rows
+            # that were active when the action started.
+            collector.delete()
+            self.model.all_objects.using(queryset.db).filter(pk__in=active_ids).delete()
+
+    def delete_model(self, request, obj):
+        self.delete_queryset(request, self.model.all_objects.using(obj._state.db).filter(pk=obj.pk))
 
     def has_restore_permission(self, request):
         # A batch can contain models beyond this changelist's permissions.
@@ -88,14 +112,25 @@ class SoftDeleteAdmin(admin.ModelAdmin):
         self.message_user(request, f"Restored {count} record(s), including related records.", messages.SUCCESS if count else messages.INFO)
 
     def get_deleted_objects(self, objs, request):
+        objs = list(objs)
         descriptions, counts, permissions, seen = [], {}, set(), set()
+        archived = [obj for obj in objs if obj.deleted_at is not None]
+        protected = []
+        if archived:
+            descriptions, counts, permissions, protected = super().get_deleted_objects(archived, request)
+            descriptions.insert(0, "PERMANENT deletion of archived records below. These cannot be restored.")
+            queryset = self.model.all_objects.using(archived[0]._state.db).filter(
+                pk__in=[obj.pk for obj in archived]
+            )
+            _, active = self._purge_collector(queryset)
+            protected.extend(f"Active {obj._meta.verbose_name}: {obj}" for obj in active)
 
         def collect(obj):
             key = (obj._meta.label, obj.pk)
             if key in seen or obj.deleted_at is not None:
                 return
             seen.add(key)
-            descriptions.append(f"{obj._meta.verbose_name}: {obj}")
+            descriptions.append(f"Archive {obj._meta.verbose_name}: {obj}")
             name = str(obj._meta.verbose_name_plural)
             counts[name] = counts.get(name, 0) + 1
             registered = self.admin_site._registry.get(type(obj))
@@ -112,4 +147,4 @@ class SoftDeleteAdmin(admin.ModelAdmin):
 
         for obj in objs:
             collect(obj)
-        return descriptions, counts, permissions, []
+        return descriptions, counts, permissions, protected
