@@ -11,6 +11,10 @@ class Vehicle(SoftDeleteModel):
     )
     vehicle_type = models.CharField(max_length=50)
     vehicle_number = models.CharField(max_length=50, unique=True, db_index=True)
+    # A new vehicle can be insured before the registration number is issued.
+    # Its internal temporary number remains unique, while this flag keeps that
+    # implementation detail out of normal business workflows.
+    registration_pending = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

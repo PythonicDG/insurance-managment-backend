@@ -100,6 +100,54 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertEqual(Customer.objects.count(), 1)
         self.assertEqual(Vehicle.objects.count(), 1)
 
+    def test_create_record_allows_customer_without_phone(self):
+        """A customer name is enough when no phone number is available."""
+        customer = Customer.objects.create(name="Missing Phone", phone="")
+        response = self.client.post("/api/insurance/records/", {
+            "policy_number": "PHONE-OPTIONAL-001",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "3200.00",
+            "insurance_company_id": self.company.id,
+            "customer_name": customer.name,
+            "vehicle_number": "MH14CD9998",
+            "vehicle_type": "Car",
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        record = InsuranceRecord.objects.get(pk=response.data["data"]["id"])
+        self.assertEqual(record.customer.phone, "")
+
+    def test_new_vehicle_can_be_registered_later(self):
+        """Pending vehicles get a unique internal reference and retain their history on registration."""
+        response = self.client.post("/api/insurance/records/", {
+            "policy_number": "NEW-VEHICLE-001",
+            "policy_start_date": str(self.today),
+            "policy_expiry_date": str(self.next_year),
+            "total_premium": "3200.00",
+            "insurance_company_id": self.company.id,
+            "customer_name": "New Vehicle Owner",
+            "customer_phone": "9876543210",
+            "vehicle_type": "Car",
+            "is_new_vehicle": True,
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        record = InsuranceRecord.objects.get(pk=response.data["data"]["id"])
+        temporary_vehicle_id = record.vehicle_id
+        self.assertTrue(record.vehicle.registration_pending)
+        self.assertTrue(record.vehicle.vehicle_number.startswith("NEW-"))
+        self.assertEqual(response.data["data"]["vehicle"]["vehicle_number"], "")
+
+        response = self.client.patch(f"/api/insurance/records/{record.id}/", {
+            "vehicle_number": "MH 14 CD 9998",
+            "vehicle_type": "Car",
+            "is_new_vehicle": False,
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.vehicle_id, temporary_vehicle_id)
+        self.assertFalse(record.vehicle.registration_pending)
+        self.assertEqual(record.vehicle.vehicle_number, "MH14CD9998")
+
     def test_duplicate_policy_number_is_rejected(self):
         """Duplicate insurance policy numbers should be rejected."""
         customer = Customer.objects.create(name="Aarav Nair", phone="9876500001")

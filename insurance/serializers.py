@@ -1,6 +1,7 @@
 from config.serializers import SoftDeleteModelSerializer
 from datetime import timedelta
 from decimal import Decimal
+from uuid import uuid4
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
@@ -73,9 +74,14 @@ class RecordCustomerSummarySerializer(SoftDeleteModelSerializer):
 
 
 class RecordVehicleSummarySerializer(SoftDeleteModelSerializer):
+    vehicle_number = serializers.SerializerMethodField()
+
+    def get_vehicle_number(self, obj):
+        return "" if obj.registration_pending else obj.vehicle_number
+
     class Meta:
         model = Vehicle
-        fields = ["id", "vehicle_type", "vehicle_number"]
+        fields = ["id", "vehicle_type", "vehicle_number", "registration_pending"]
 
 
 class RecordCompanySummarySerializer(SoftDeleteModelSerializer):
@@ -223,7 +229,7 @@ class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
 
     # Customer inputs (Support either existing ID or automatic create/find details)
     customer_id = serializers.IntegerField(required=False, write_only=True)
-    customer_phone = serializers.CharField(max_length=20, required=False, write_only=True)
+    customer_phone = serializers.CharField(max_length=20, required=False, allow_blank=True, write_only=True)
     customer_alternative_mobile_number = serializers.CharField(max_length=20, required=False, allow_blank=True, write_only=True)
     customer_name = serializers.CharField(max_length=255, required=False, allow_blank=True, write_only=True)
     customer_email = serializers.EmailField(required=False, allow_blank=True, write_only=True)
@@ -232,8 +238,9 @@ class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
 
     # Vehicle inputs (Support either existing ID or automatic create/find details)
     vehicle_id = serializers.IntegerField(required=False, write_only=True)
-    vehicle_number = serializers.CharField(max_length=50, required=False, write_only=True)
+    vehicle_number = serializers.CharField(max_length=50, required=False, allow_blank=True, write_only=True)
     vehicle_type = serializers.CharField(max_length=50, required=False, allow_blank=True, write_only=True)
+    is_new_vehicle = serializers.BooleanField(required=False, default=False, write_only=True)
 
     # Policy inputs
     alternative_mobile_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
@@ -281,6 +288,7 @@ class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
             "vehicle_id",
             "vehicle_number",
             "vehicle_type",
+            "is_new_vehicle",
             "initial_payment",
             "paid_amount",
             "initial_payment_method",
@@ -409,23 +417,29 @@ class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
             has_customer = (
                 attrs.get("customer_id")
                 or attrs.get("customer_phone")
+                or attrs.get("customer_name")
                 or self.initial_data.get("phone")
                 or self.initial_data.get("customer")
             )
             if not has_customer:
                 raise serializers.ValidationError(
-                    {"customer": "Either customer_id or customer_phone is required."}
+                    {"customer": "Either customer_id, customer name, or customer_phone is required."}
                 )
 
+            is_new_vehicle = attrs.get("is_new_vehicle", False)
             has_vehicle = (
                 attrs.get("vehicle_id")
                 or attrs.get("vehicle_number")
                 or self.initial_data.get("vehicle")
             )
-            if not has_vehicle:
+            if not has_vehicle and not is_new_vehicle:
                 raise serializers.ValidationError(
-                    {"vehicle": "Either vehicle_id or vehicle_number is required."}
+                    {"vehicle": "Either vehicle_id or vehicle_number is required, unless this is a new vehicle awaiting registration."}
                 )
+            if is_new_vehicle and has_vehicle:
+                raise serializers.ValidationError({
+                    "vehicle_number": "Do not enter a vehicle number while 'new vehicle awaiting registration' is selected."
+                })
 
         return attrs
 
@@ -568,9 +582,25 @@ class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
                 address=customer_address or "",
             )
 
+        # A phone number is optional for record entry. Never merge customers
+        # by name alone: names are not unique and that could attach a policy to
+        # the wrong person. Create a distinct customer instead.
+        if customer_name:
+            return Customer.objects.create(
+                phone="",
+                name=customer_name,
+                alternative_mobile_number=customer_alt_phone or "",
+                email=customer_email or "",
+                address=customer_address or "",
+            )
+
         return None
 
     def _resolve_vehicle(self, customer, validated_data):
+        is_new_vehicle = validated_data.pop("is_new_vehicle", False)
+        if isinstance(is_new_vehicle, str):
+            is_new_vehicle = is_new_vehicle.lower() in ("true", "1", "yes")
+
         # 1. Check direct vehicle_id
         vehicle_id = validated_data.pop("vehicle_id", None) or self.initial_data.get("vehicle_id")
         if not vehicle_id and isinstance(self.initial_data.get("vehicle"), int):
@@ -584,6 +614,48 @@ class InsuranceRecordCreateUpdateSerializer(SoftDeleteModelSerializer):
             validated_data.pop("vehicle_type", "")
             or self.initial_data.get("vehicle_type", "")
         )
+
+        # A pending registration must never share a blank vehicle number.  We
+        # store an opaque, collision-resistant temporary number and preserve a
+        # flag so the UI can keep the registration field empty until issued.
+        if is_new_vehicle:
+            if vehicle_id or vehicle_number:
+                raise serializers.ValidationError({
+                    "vehicle_number": "A new vehicle awaiting registration cannot also have a vehicle number."
+                })
+            if self.instance and not self.instance.vehicle.registration_pending:
+                raise serializers.ValidationError({
+                    "is_new_vehicle": "Only a vehicle already awaiting registration can remain marked as new."
+                })
+            if self.instance:
+                return self.instance.vehicle
+            return Vehicle.objects.create(
+                customer=customer,
+                vehicle_number=f"NEW-{uuid4().hex.upper()}",
+                vehicle_type=vehicle_type or "General",
+                registration_pending=True,
+            )
+
+        # When the registration arrives, rename the same temporary vehicle.
+        # This keeps its policy history, documents and payments attached.
+        if self.instance and self.instance.vehicle.registration_pending and vehicle_number:
+            normalized_number = Vehicle.normalize_vehicle_number(vehicle_number)
+            if not normalized_number:
+                raise serializers.ValidationError({"vehicle_number": "Valid vehicle number is required."})
+            conflict = Vehicle.all_objects.filter(vehicle_number__iexact=normalized_number).exclude(
+                pk=self.instance.vehicle_id
+            ).first()
+            if conflict:
+                raise serializers.ValidationError({
+                    "vehicle_number": "A vehicle with this registration number already exists."
+                })
+            vehicle = self.instance.vehicle
+            vehicle.vehicle_number = normalized_number
+            vehicle.registration_pending = False
+            if vehicle_type:
+                vehicle.vehicle_type = vehicle_type
+            vehicle.save(update_fields=["vehicle_number", "registration_pending", "vehicle_type", "updated_at"])
+            return vehicle
 
         if vehicle_id:
             try:

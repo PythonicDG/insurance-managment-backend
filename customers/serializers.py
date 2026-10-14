@@ -6,6 +6,10 @@ from vehicles.models import Vehicle
 
 class CustomerVehicleSummarySerializer(SoftDeleteModelSerializer):
     records_count = serializers.IntegerField(read_only=True, default=0)
+    vehicle_number = serializers.SerializerMethodField()
+
+    def get_vehicle_number(self, obj):
+        return "" if obj.registration_pending else obj.vehicle_number
 
     class Meta:
         model = Vehicle
@@ -21,6 +25,10 @@ class CustomerVehicleSummarySerializer(SoftDeleteModelSerializer):
 
 class CustomerVehicleDetailSerializer(SoftDeleteModelSerializer):
     records_count = serializers.IntegerField(read_only=True, default=0)
+    vehicle_number = serializers.SerializerMethodField()
+
+    def get_vehicle_number(self, obj):
+        return "" if obj.registration_pending else obj.vehicle_number
 
     class Meta:
         model = Vehicle

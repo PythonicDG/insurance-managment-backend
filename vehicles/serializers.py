@@ -16,6 +16,7 @@ class VehicleSerializer(SoftDeleteModelSerializer):
             "customer_phone",
             "vehicle_type",
             "vehicle_number",
+            "registration_pending",
             "created_at",
             "updated_at",
         ]
