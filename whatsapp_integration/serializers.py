@@ -1,6 +1,6 @@
 from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
-from datetime import date, time
+from datetime import date
 from .models import WhatsAppConfig, WhatsAppMessageLog
 from .renewals import readiness_issues
 
@@ -46,11 +46,6 @@ class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
 
     def get_renewal_readiness_issues(self, obj):
         return readiness_issues(obj)
-
-    def validate_renewal_send_time(self, value):
-        if not (time(10) <= value < time(12) or time(16, 30) <= value < time(18)):
-            raise serializers.ValidationError("Choose 10:00–11:59 or 16:30–17:59 (server business timezone).")
-        return value
 
     def validate_renewal_stages(self, value):
         if not isinstance(value, list) or any(type(v) is not int or v not in [30, 15, 7, 2, 0] for v in value):

@@ -57,13 +57,25 @@ class RenewalTests(TestCase):
         self.assertEqual(current_stage(14), 15)
         self.assertIsNone(current_stage(-1))
 
+    @patch("whatsapp_integration.renewals.requests.get")
     @patch("whatsapp_integration.renewals.requests.post")
-    def test_paid_after_queue_never_sent(self, post):
+    def test_paid_policy_is_queued_and_sent(self, post, get):
+        Payment.objects.create(insurance_record=self.record, amount=100)
+        self.assertEqual(enqueue_due(), 1)
+        get.return_value, post.return_value = self.approval(), self.sent()
+        self.assertTrue(self.run_dispatch())
+        self.assertEqual(RenewalReminderJob.objects.get().status, "sent")
+        self.assertEqual(post.call_count, 1)
+
+    @patch("whatsapp_integration.renewals.requests.get")
+    @patch("whatsapp_integration.renewals.requests.post")
+    def test_paid_after_queue_is_still_sent(self, post, get):
         enqueue(self.record)
         Payment.objects.create(insurance_record=self.record, amount=100)
-        self.assertFalse(self.run_dispatch())
-        post.assert_not_called()
-        self.assertEqual(RenewalReminderJob.objects.get().status, "skipped")
+        get.return_value, post.return_value = self.approval(), self.sent()
+        self.assertTrue(self.run_dispatch())
+        self.assertEqual(RenewalReminderJob.objects.get().status, "sent")
+        self.assertEqual(post.call_count, 1)
 
     @patch("whatsapp_integration.renewals.requests.post")
     def test_scheduled_renewal_after_queue_never_sent(self, post):
@@ -77,15 +89,16 @@ class RenewalTests(TestCase):
 
     @patch("whatsapp_integration.renewals.requests.get")
     @patch("whatsapp_integration.renewals.requests.post")
-    def test_recheck_payment_immediately_before_send(self, post, get):
+    def test_payment_during_approval_does_not_cancel_reminder(self, post, get):
         enqueue(self.record)
         def approved(*args, **kwargs):
             Payment.objects.create(insurance_record=self.record, amount=100)
             return self.approval()
         get.side_effect = approved
+        post.return_value = self.sent()
         self.assertTrue(self.run_dispatch())
-        post.assert_not_called()
-        self.assertEqual(WhatsAppMessageLog.objects.get().status, "skipped")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(WhatsAppMessageLog.objects.get().status, "sent")
 
     @patch("whatsapp_integration.renewals.requests.get")
     @patch("whatsapp_integration.renewals.requests.post")
@@ -133,6 +146,17 @@ class RenewalTests(TestCase):
         self.assertTrue(WhatsAppMessageLog.objects.get().is_test)
 
     @patch("whatsapp_integration.renewals.requests.post")
+    def test_older_queued_test_is_skipped(self, post):
+        job = RenewalReminderJob.objects.create(stage=30, is_test=True, source="test",
+            recipient_phone=self.config.test_phone_number, expiry_date=self.today + timedelta(days=30))
+        RenewalReminderJob.objects.filter(pk=job.pk).update(created_at=self.now - timedelta(days=1))
+        self.assertFalse(self.run_dispatch())
+        job.refresh_from_db()
+        self.assertEqual(job.status, "skipped")
+        self.assertIn("expired", job.reason)
+        post.assert_not_called()
+
+    @patch("whatsapp_integration.renewals.requests.post")
     def test_manual_endpoint_queues_without_network_and_deduplicates(self, post):
         url = f"/api/whatsapp/records/{self.record.pk}/renewal/"
         self.assertEqual(self.client.post(url).status_code, 202)
@@ -143,19 +167,22 @@ class RenewalTests(TestCase):
         self.assertEqual(self.client.post(url).status_code, 401)
 
     def test_business_windows_sundays_holidays_and_settings_validation(self):
-        for clock, expected in [(time(9, 30), False), (time(10, 29), False), (time(10, 30), True),
-                                (time(12), False), (time(16, 30), False), (time(19, 30), False)]:
+        for clock, expected in [(time(0), False), (time(10, 29, 59), False), (time(10, 30), True),
+                                (time(12), True), (time(16, 30), True), (time(23, 59), True)]:
             self.assertEqual(business_time(self.config, timezone.make_aware(datetime.combine(self.today, clock))), expected)
-        self.config.renewal_send_time = time(16, 30)
-        self.assertTrue(business_time(self.config, timezone.make_aware(datetime.combine(self.today, time(17)))))
-        self.assertFalse(business_time(self.config, timezone.make_aware(datetime.combine(self.today, time(18)))))
+        self.config.renewal_send_time = time(16, 40, 36)
+        self.assertFalse(business_time(self.config, timezone.make_aware(datetime.combine(self.today, time(16, 40, 35)))))
+        self.assertTrue(business_time(self.config, timezone.make_aware(datetime.combine(self.today, time(16, 40, 36)))))
+        self.assertTrue(business_time(self.config, timezone.make_aware(datetime.combine(self.today, time(23, 59)))))
         self.config.renewal_holidays = [self.today.isoformat()]
         self.assertFalse(business_time(self.config, timezone.make_aware(datetime.combine(self.today, time(17)))))
         self.config.renewal_holidays = []
         self.config.renewal_skip_sundays = True
         sunday = self.today + timedelta(days=(6 - self.today.weekday()) % 7)
         self.assertFalse(business_time(self.config, timezone.make_aware(datetime.combine(sunday, time(17)))))
-        for data in [{"renewal_send_time": "03:00"}, {"renewal_stages": [1]}, {"renewal_daily_cap": 0}, {"renewal_holidays": ["bad"]}]:
+        for value in ["03:00", "16:40:36", "23:59:59"]:
+            self.assertTrue(WhatsAppConfigSerializer(self.config, data={"renewal_send_time": value}, partial=True).is_valid())
+        for data in [{"renewal_send_time": "24:00"}, {"renewal_stages": [1]}, {"renewal_daily_cap": 0}, {"renewal_holidays": ["bad"]}]:
             self.assertFalse(WhatsAppConfigSerializer(self.config, data=data, partial=True).is_valid())
 
     def test_disabled_stages_and_master(self):

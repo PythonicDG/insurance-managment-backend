@@ -1,5 +1,5 @@
 """Durable, fail-closed renewal outbox; only the management worker calls Meta."""
-from datetime import time, timedelta
+from datetime import timedelta
 import requests
 from django.db import models, transaction
 from django.utils import timezone
@@ -53,18 +53,14 @@ def stop_reason(record, today):
     if InsuranceRecord.objects.filter(vehicle_id=record.vehicle_id,
                                       policy_expiry_date__gt=record.policy_expiry_date).exclude(pk=record.pk).exists():
         return "A newer policy exists for this vehicle."
-    if record.payment_status == "PAID":
-        return "Policy is already paid."
     return ""
 
 
 def business_time(config, now):
     local = timezone.localtime(now)
     clock = local.time().replace(tzinfo=None)
-    if not (time(10) <= clock < time(12) or time(16, 30) <= clock < time(18)):
-        return False
-    # Choose one send window per day, with dispatch allowed after the preference.
-    if clock < config.renewal_send_time or (config.renewal_send_time < time(12) and clock >= time(12)):
+    # Dispatch on the configured local day, at or after the preferred time.
+    if clock < config.renewal_send_time:
         return False
     if config.renewal_skip_sundays and local.weekday() == 6:
         return False
@@ -145,6 +141,9 @@ def claim_one():
             return None
         jobs = RenewalReminderJob.objects.filter(status="queued").select_for_update().order_by("expiry_date", "stage", "id")
         for job in jobs:
+            if job.is_test and timezone.localtime(job.created_at).date() != today:
+                skip(job, "Test reminder expired; queue a new test.")
+                continue
             if not job.is_test and job.source == "automatic" and not config.renewal_enabled:
                 continue
             if not job.is_test and job.stage not in config.renewal_stages:
