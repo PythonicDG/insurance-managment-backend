@@ -1,8 +1,10 @@
 from datetime import timedelta, datetime, time
 from decimal import Decimal
+from io import StringIO
 from unittest.mock import Mock, patch
 import requests
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -165,6 +167,30 @@ class RenewalTests(TestCase):
         self.config.save()
         self.assertEqual(enqueue_due(), 0)
         self.assertEqual(self.client.post(f"/api/whatsapp/records/{self.record.pk}/renewal/").status_code, 400)
+        self.assertEqual(RenewalReminderJob.objects.count(), 0)
+
+    def test_readiness_reports_saved_blockers_without_sending(self):
+        self.config.renewal_enabled = False
+        self.config.access_token = ""
+        self.config.phone_number_id = ""
+        self.config.waba_id = ""
+        self.config.test_mode = True
+        self.config.test_phone_number = ""
+        self.config.save()
+        response = self.client.get("/api/whatsapp/config/")
+        self.assertEqual(response.status_code, 200)
+        issues = response.data["renewal_readiness_issues"]
+        self.assertIn("Automatic renewal reminders are disabled.", issues)
+        self.assertIn("Meta access token is missing.", issues)
+        self.assertIn("Meta Phone Number ID is missing.", issues)
+        self.assertIn("Meta WABA ID is missing.", issues)
+        self.assertIn("A valid admin test phone is required in test mode.", issues)
+        self.assertEqual(RenewalReminderJob.objects.count(), 0)
+        output = StringIO()
+        with patch("whatsapp_integration.renewals.requests.post") as post:
+            call_command("process_renewal_reminders", "--check", stdout=output)
+            post.assert_not_called()
+        self.assertIn("Automatic renewal reminders are disabled.", output.getvalue())
         self.assertEqual(RenewalReminderJob.objects.count(), 0)
 
     def test_webhook_keeps_event_history_without_regression_and_resend_blocked(self):

@@ -772,6 +772,23 @@ class LedgerApiTestCase(APITestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["policy_number"], "POL-LEDGER-002")
 
+    def test_ledger_policy_start_date_filter(self):
+        """The date range scopes rows and summary by policy start, not entry date."""
+        yesterday = self.today - datetime.timedelta(days=1)
+        InsuranceRecord.objects.filter(pk=self.r2.pk).update(policy_start_date=yesterday)
+
+        res = self.client.get(
+            "/api/payments/ledger/",
+            {
+                "policy_start_date_from": str(self.today),
+                "policy_start_date_to": str(self.today),
+            },
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["count"], 1)
+        self.assertEqual(res.data["results"][0]["policy_number"], "POL-LEDGER-001")
+        self.assertEqual(res.data["summary"]["total_premium"], 178500.0)
+
     def test_ledger_summary_endpoint(self):
         """Verify GET /api/payments/ledger/summary/."""
         res = self.client.get("/api/payments/ledger/summary/")

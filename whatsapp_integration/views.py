@@ -134,7 +134,7 @@ class WhatsAppTestMessageView(APIView):
         log_data = WhatsAppMessageLogSerializer(log).data
         success = log.status in ("sent", "delivered", "read")
         msg = (
-            f"Test message sent successfully to {log.recipient_phone}!"
+            f"Meta accepted the test message for {log.recipient_phone}. Delivery is not confirmed yet; check webhook updates."
             if success
             else f"Failed to send test message: {log.error_message}"
         )

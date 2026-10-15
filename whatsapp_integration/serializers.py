@@ -2,11 +2,13 @@ from config.serializers import SoftDeleteModelSerializer
 from rest_framework import serializers
 from datetime import date, time
 from .models import WhatsAppConfig, WhatsAppMessageLog
+from .renewals import readiness_issues
 
 
 class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
     has_access_token = serializers.SerializerMethodField()
     masked_token = serializers.SerializerMethodField()
+    renewal_readiness_issues = serializers.SerializerMethodField()
 
     class Meta:
         model = WhatsAppConfig
@@ -32,6 +34,7 @@ class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
             "renewal_enabled", "renewal_send_time", "renewal_skip_sundays",
             "renewal_skip_holidays", "renewal_holidays", "renewal_stages",
             "renewal_daily_cap", "renewal_language",
+            "renewal_readiness_issues",
             "updated_at",
         ]
         extra_kwargs = {
@@ -40,6 +43,9 @@ class WhatsAppConfigSerializer(SoftDeleteModelSerializer):
 
     def get_has_access_token(self, obj) -> bool:
         return bool(obj.access_token and obj.access_token.strip())
+
+    def get_renewal_readiness_issues(self, obj):
+        return readiness_issues(obj)
 
     def validate_renewal_send_time(self, value):
         if not (time(10) <= value < time(12) or time(16, 30) <= value < time(18)):

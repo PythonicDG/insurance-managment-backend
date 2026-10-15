@@ -10,6 +10,28 @@ from .services import WhatsAppClient, normalize_phone_number
 STAGES = (30, 15, 7, 2, 0)
 
 
+def readiness_issues(config):
+    """Local blockers that prevent automatic renewal dispatch (no Meta calls)."""
+    issues = []
+    if not config.is_enabled:
+        issues.append("WhatsApp sending is disabled.")
+    if not config.renewal_enabled:
+        issues.append("Automatic renewal reminders are disabled.")
+    if not config.access_token or not config.access_token.strip():
+        issues.append("Meta access token is missing.")
+    if not config.phone_number_id or not config.phone_number_id.strip():
+        issues.append("Meta Phone Number ID is missing.")
+    if not config.waba_id or not config.waba_id.strip():
+        issues.append("Meta WABA ID is missing.")
+    if config.test_mode:
+        phone = normalize_phone_number(config.test_phone_number, config.default_country_code)
+        if not 8 <= len(phone) <= 15:
+            issues.append("A valid admin test phone is required in test mode.")
+    if not config.renewal_stages:
+        issues.append("No renewal reminder stages are selected.")
+    return issues
+
+
 def template_name(stage):
     return f"policy_renewal_reminder_{stage}d"
 

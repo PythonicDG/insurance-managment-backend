@@ -364,6 +364,18 @@ class InsuranceRecordAPITestCase(APITestCase):
         self.assertEqual(res_expired.data["count"], 1)
         self.assertEqual(res_expired.data["results"][0]["policy_number"], "EXP-001")
 
+        # Both records were entered today; this range must use policy start date.
+        start_date_results = self.client.get(
+            "/api/insurance/records/",
+            {
+                "policy_start_date_from": str(self.today),
+                "policy_start_date_to": str(self.today),
+            },
+        )
+        self.assertEqual(start_date_results.status_code, status.HTTP_200_OK)
+        self.assertEqual(start_date_results.data["count"], 1)
+        self.assertEqual(start_date_results.data["results"][0]["policy_number"], "ACT-001")
+
     def test_record_filters_expiring_soon_and_expiring_today(self):
         """Test filtering by expiring_soon (next 10 days) and expiring_today."""
         customer = Customer.objects.create(name="Exp Test Customer", phone="9988776655")

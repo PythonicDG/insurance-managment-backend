@@ -262,7 +262,15 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             except (ValueError, TypeError):
                 queryset = queryset.filter(insurance_company__name__icontains=str(company_id).strip())
 
-        # 3. Date range filters (entry_date)
+        # 3. Date range filters. Keep entry-date parameters for existing API callers.
+        policy_start_from = params.get("policy_start_date_from")
+        if policy_start_from:
+            queryset = queryset.filter(policy_start_date__gte=policy_start_from)
+
+        policy_start_to = params.get("policy_start_date_to")
+        if policy_start_to:
+            queryset = queryset.filter(policy_start_date__lte=policy_start_to)
+
         date_from = params.get("date_from") or params.get("entry_date_from") or params.get("start_date")
         if date_from:
             queryset = queryset.filter(entry_date__gte=date_from)
